@@ -46,26 +46,32 @@
   ];
 
   # Control-plane Postgres, managed by devenv (`devenv up`).
+  # Socket-only (no listen_addresses) so it never collides with a system
+  # Postgres on the TCP port; the socket lives in a per-project runtime dir.
+  # The port only names the socket file here — set high/uncommon to dodge any
+  # already-running Postgres.
   services.postgres = {
     enable = true;
     package = pkgs.postgresql_17;
-    listen_addresses = "127.0.0.1";
+    port = 54329;
     initialDatabases = [ { name = "ravn"; } ];
   };
 
-  # NATS broker with JetStream, run as a managed process.
-  processes.nats.exec = "${pkgs.nats-server}/bin/nats-server --jetstream --store_dir ${config.env.DEVENV_STATE}/nats";
+  # NATS broker with JetStream, run as a managed process on a high/uncommon
+  # port so it never collides with an already-running NATS on the default 4222.
+  processes.nats.exec = "${pkgs.nats-server}/bin/nats-server --addr 127.0.0.1 --port 14222 --jetstream --store_dir ${config.env.DEVENV_STATE}/nats";
 
   env = {
-    # Convenience defaults wired to the devenv Postgres socket.
-    DATABASE_URL = "postgres:///ravn?host=${config.env.DEVENV_STATE}/postgres";
     RUST_LOG = "info";
-    NATS_URL = "nats://127.0.0.1:4222";
+    NATS_URL = "nats://127.0.0.1:14222";
   };
 
   enterShell = ''
+    # devenv runs Postgres on a unix socket in $PGHOST; derive DATABASE_URL
+    # from the live socket so it always matches the running instance.
+    export DATABASE_URL="postgresql:///ravn?host=$PGHOST&port=$PGPORT"
     echo "Ravn dev shell — rustc $(rustc --version | cut -d' ' -f2), node $(node --version)"
-    echo "  devenv up      → start Postgres + NATS"
+    echo "  devenv up      → start Postgres (socket) + NATS (:14222)"
     echo "  cargo build    → build the workspace"
   '';
 }

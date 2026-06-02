@@ -1,0 +1,13 @@
+# Rust
+/target/
+
+# Nix / devenv / direnv
+.devenv/
+.devenv.flake.nix
+devenv.local.nix
+.direnv/
+result
+result-*
+
+# Node / portal
+node_modules/

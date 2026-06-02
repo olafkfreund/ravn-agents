@@ -1,0 +1,10 @@
+# devenv inputs. Pinned via devenv.lock (committed).
+# https://devenv.sh/reference/yaml-options/
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

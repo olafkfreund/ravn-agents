@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ravn-core",
+  "crates/ravn-agent",
+  "crates/ravn-server",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/olafkfreund/ravn-agents"
+
+[workspace.dependencies]
+ravn-core = { path = "crates/ravn-core" }
+
+# Names the virtual workspace for crane (avoids a placeholder-name warning).
+[workspace.metadata.crane]
+name = "ravn"

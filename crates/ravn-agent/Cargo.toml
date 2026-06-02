@@ -1,0 +1,14 @@
+[package]
+name = "ravn-agent"
+description = "The ravnd daemon: detection, local inference, and transport to the control plane."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ravnd"
+path = "src/main.rs"
+
+[dependencies]
+ravn-core.workspace = true

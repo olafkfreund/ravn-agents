@@ -1,0 +1,9 @@
+[package]
+name = "ravn-core"
+description = "Shared types for Ravn agents and the control plane (Event schema, transport contracts)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

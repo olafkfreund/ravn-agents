@@ -44,6 +44,8 @@
           pname = "ravn-agent";
           cargoExtraArgs = "-p ravn-agent";
           doCheck = false;
+          # The agent crate produces the `ravnd` daemon (epic #3).
+          meta.mainProgram = "ravnd";
         });
 
         ravn-server = craneLib.buildPackage (commonArgs // {
@@ -51,6 +53,7 @@
           pname = "ravn-server";
           cargoExtraArgs = "-p ravn-server";
           doCheck = false;
+          meta.mainProgram = "ravn-server";
         });
       in
       {
@@ -77,5 +80,45 @@
         devShells.default = craneLib.devShell {
           inputsFrom = [ ravn-agent ravn-server ];
         };
-      });
+      }) // {
+      # System-independent outputs.
+
+      # Adds the Ravn binaries to a package set, so the NixOS modules can
+      # default their `package` option to `pkgs.ravn-agent` / `pkgs.ravn-server`.
+      overlays.default = final: _prev: {
+        ravn-agent = self.packages.${final.stdenv.hostPlatform.system}.ravn-agent;
+        ravn-server = self.packages.${final.stdenv.hostPlatform.system}.ravn-server;
+      };
+
+      nixosModules = {
+        # `services.ravn.agent` (#35). Imports the implementation and applies
+        # the overlay so the package default resolves out of the box.
+        agent = { ... }: {
+          imports = [ ./nixos/modules/agent.nix ];
+          nixpkgs.overlays = [ self.overlays.default ];
+        };
+        default = self.nixosModules.agent;
+      };
+
+      # Canonical single-machine example. Replicate the node (agent2, agent3, …)
+      # to grow into a fleet. Built as a container profile so it evaluates cheaply.
+      nixosConfigurations.demo-agent = nixpkgs.lib.nixosSystem {
+        modules = [
+          self.nixosModules.agent
+          ({ ... }: {
+            nixpkgs.hostPlatform = "x86_64-linux";
+            boot.isContainer = true;
+            system.stateVersion = "25.05";
+            networking.hostName = "demo-agent";
+
+            services.ravn.agent = {
+              enable = true;
+              server.url = "nats://control.example.com:4222";
+              enrollment.bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
+              detection.configDrift.paths = [ "/etc/nixos" ];
+            };
+          })
+        ];
+      };
+    };
 }

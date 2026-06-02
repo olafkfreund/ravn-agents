@@ -1,0 +1,26 @@
+{% if site.giscus.repo_id != "PLACEHOLDER" %}
+<section class="comments" style="margin-top:2.5rem">
+  <script src="https://giscus.app/client.js"
+          data-repo="{{ site.giscus.repo }}"
+          data-repo-id="{{ site.giscus.repo_id }}"
+          data-category="{{ site.giscus.category }}"
+          data-category-id="{{ site.giscus.category_id }}"
+          data-mapping="pathname"
+          data-strict="0"
+          data-reactions-enabled="1"
+          data-emit-metadata="0"
+          data-input-position="top"
+          data-theme="preferred_color_scheme"
+          data-lang="en"
+          crossorigin="anonymous"
+          async>
+  </script>
+</section>
+{% else %}
+<section class="comments" style="margin-top:2.5rem">
+  <p><em>Comments are powered by <a href="https://giscus.app">Giscus</a> (GitHub
+  Discussions). They go live once Discussions is enabled, the Giscus app is
+  installed, and <code>repo_id</code>/<code>category_id</code> are set in
+  <code>_config.yml</code>.</em></p>
+</section>
+{% endif %}

@@ -1,0 +1,30 @@
+title: Ravn
+description: >-
+  Small local-LLM agents that watch your Linux servers and report back in
+  plain language.
+theme: minima
+url: "https://olafkfreund.github.io"
+baseurl: "/ravn-agents"
+
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+
+header_pages:
+  - roadmap.md
+  - architecture.md
+  - get-involved.md
+
+minima:
+  social_links:
+    github: olafkfreund/ravn-agents
+
+# Giscus comments (backed by GitHub Discussions).
+# To enable: turn on Discussions in repo settings, install the Giscus GitHub App
+# (https://github.com/apps/giscus), then fill repo_id and category_id from
+# https://giscus.app. Until then, posts show a friendly placeholder.
+giscus:
+  repo: "olafkfreund/ravn-agents"
+  repo_id: "PLACEHOLDER"
+  category: "Announcements"
+  category_id: "PLACEHOLDER"

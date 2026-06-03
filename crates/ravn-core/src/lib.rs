@@ -7,10 +7,12 @@
 //! emits and the control plane persists/serves is expressed in these types.
 
 mod event;
+mod heartbeat;
 mod message;
 mod payload;
 
 pub use event::{AgentId, Event, Severity, Source};
+pub use heartbeat::Heartbeat;
 pub use message::{Explanation, Message};
 pub use payload::{
     AuthPayload, ConfigDriftPayload, Extra, FailedUnitPayload, JournaldPayload, Payload,

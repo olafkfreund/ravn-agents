@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
-use ravn_core::Message;
+use ravn_core::{Heartbeat, Message};
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
@@ -121,6 +121,11 @@ pub struct Agent {
     pub status: String,
     /// User-defined key/value labels.
     pub labels: BTreeMap<String, String>,
+    /// Health from the latest heartbeat (#20), if any.
+    pub last_heartbeat: Option<DateTime<Utc>>,
+    pub uptime_secs: Option<i64>,
+    pub inference_enabled: Option<bool>,
+    pub events_published: Option<i64>,
 }
 
 /// One grouping dimension (label key) and its values.
@@ -142,7 +147,14 @@ struct AgentRow {
     host: String,
     first_seen: DateTime<Utc>,
     last_seen: DateTime<Utc>,
+    last_heartbeat: Option<DateTime<Utc>>,
+    uptime_secs: Option<i64>,
+    inference_enabled: Option<bool>,
+    events_published: Option<i64>,
 }
+
+const AGENT_COLUMNS: &str =
+    "agent_id, host, first_seen, last_seen, last_heartbeat, uptime_secs, inference_enabled, events_published";
 
 #[derive(FromRow)]
 struct LabelRow {
@@ -181,9 +193,9 @@ pub async fn touch_agent(pool: &PgPool, agent_id: Uuid, host: &str) -> anyhow::R
 
 /// All registered agents with status and labels.
 pub async fn list_agents(pool: &PgPool) -> anyhow::Result<Vec<Agent>> {
-    let rows = sqlx::query_as::<_, AgentRow>(
-        "SELECT agent_id, host, first_seen, last_seen FROM agents ORDER BY host",
-    )
+    let rows = sqlx::query_as::<_, AgentRow>(&format!(
+        "SELECT {AGENT_COLUMNS} FROM agents ORDER BY host"
+    ))
     .fetch_all(pool)
     .await
     .context("listing agents")?;
@@ -208,15 +220,19 @@ pub async fn list_agents(pool: &PgPool) -> anyhow::Result<Vec<Agent>> {
             host: r.host,
             first_seen: r.first_seen,
             last_seen: r.last_seen,
+            last_heartbeat: r.last_heartbeat,
+            uptime_secs: r.uptime_secs,
+            inference_enabled: r.inference_enabled,
+            events_published: r.events_published,
         })
         .collect())
 }
 
 /// A single agent, or `None` if unknown.
 pub async fn get_agent(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Agent>> {
-    let Some(r) = sqlx::query_as::<_, AgentRow>(
-        "SELECT agent_id, host, first_seen, last_seen FROM agents WHERE agent_id = $1",
-    )
+    let Some(r) = sqlx::query_as::<_, AgentRow>(&format!(
+        "SELECT {AGENT_COLUMNS} FROM agents WHERE agent_id = $1"
+    ))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -240,7 +256,38 @@ pub async fn get_agent(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Agent>>
         host: r.host,
         first_seen: r.first_seen,
         last_seen: r.last_seen,
+        last_heartbeat: r.last_heartbeat,
+        uptime_secs: r.uptime_secs,
+        inference_enabled: r.inference_enabled,
+        events_published: r.events_published,
     }))
+}
+
+/// Record a heartbeat: refresh liveness and store the health snapshot.
+pub async fn record_heartbeat(pool: &PgPool, hb: &Heartbeat) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agents
+            (agent_id, host, last_seen, last_heartbeat, uptime_secs, inference_enabled, events_published)
+        VALUES ($1, $2, now(), now(), $3, $4, $5)
+        ON CONFLICT (agent_id) DO UPDATE SET
+            host = EXCLUDED.host,
+            last_seen = now(),
+            last_heartbeat = now(),
+            uptime_secs = EXCLUDED.uptime_secs,
+            inference_enabled = EXCLUDED.inference_enabled,
+            events_published = EXCLUDED.events_published
+        "#,
+    )
+    .bind(hb.agent_id.0)
+    .bind(&hb.host)
+    .bind(hb.uptime_secs as i64)
+    .bind(hb.inference_enabled)
+    .bind(hb.events_published as i64)
+    .execute(pool)
+    .await
+    .context("recording heartbeat")?;
+    Ok(())
 }
 
 /// Replace an agent's labels. Returns `false` if the agent is unknown.

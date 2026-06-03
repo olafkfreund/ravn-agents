@@ -14,4 +14,7 @@ pub struct AppState {
     pub nats: async_nats::Client,
     /// Fan-out of freshly ingested events to live WebSocket subscribers (#29).
     pub events_tx: broadcast::Sender<StoredEvent>,
+    /// API auth tokens (#26). Auth is enforced only when at least one is set.
+    pub admin_token: Option<String>,
+    pub viewer_token: Option<String>,
 }

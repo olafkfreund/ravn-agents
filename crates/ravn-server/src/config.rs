@@ -15,6 +15,10 @@ pub struct Config {
     pub database_url: String,
     /// NATS server URL. `NATS_URL`, default `nats://127.0.0.1:4222`.
     pub nats_url: String,
+    /// Bearer token granting full (admin) API access. `RAVN_ADMIN_TOKEN`.
+    pub admin_token: Option<String>,
+    /// Bearer token granting read-only API access. `RAVN_VIEWER_TOKEN`.
+    pub viewer_token: Option<String>,
 }
 
 impl Config {
@@ -33,6 +37,10 @@ impl Config {
         let nats_url =
             std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
 
-        Ok(Self { bind, log, database_url, nats_url })
+        let token = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let admin_token = token("RAVN_ADMIN_TOKEN");
+        let viewer_token = token("RAVN_VIEWER_TOKEN");
+
+        Ok(Self { bind, log, database_url, nats_url, admin_token, viewer_token })
     }
 }

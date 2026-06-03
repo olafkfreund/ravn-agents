@@ -6,8 +6,10 @@
 use std::collections::BTreeMap;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -248,6 +250,55 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+/// API access role (#26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Viewer,
+    Admin,
+}
+
+/// Resolve a bearer token to a role.
+fn role_for(token: &str, admin: Option<&str>, viewer: Option<&str>) -> Option<Role> {
+    if admin == Some(token) {
+        Some(Role::Admin)
+    } else if viewer == Some(token) {
+        Some(Role::Viewer)
+    } else {
+        None
+    }
+}
+
+/// Whether `role` may perform a request with this method (safe methods need a
+/// viewer; mutating methods need admin).
+fn authorized(method: &axum::http::Method, role: Role) -> bool {
+    method.is_safe() || role == Role::Admin
+}
+
+/// Bearer-token auth + RBAC. No-op when no tokens are configured.
+async fn auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if state.admin_token.is_none() && state.viewer_token.is_none() {
+        return next.run(req).await; // auth disabled
+    }
+
+    let token = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    let Some(role) = token.and_then(|t| {
+        role_for(t, state.admin_token.as_deref(), state.viewer_token.as_deref())
+    }) else {
+        return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
+    };
+
+    if authorized(req.method(), role) {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "admin role required").into_response()
+    }
+}
+
 /// Stateless system routes (liveness + the OpenAPI document).
 fn system_router() -> Router {
     Router::new()
@@ -266,6 +317,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/categories", get(list_categories))
         .route("/api/topology", get(topology))
         .route("/ws/events", get(ws_events))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 
     system_router()
@@ -312,5 +364,26 @@ mod tests {
         assert!(body["openapi"].as_str().unwrap().starts_with("3."));
         assert!(body["paths"]["/health"].is_object());
         assert!(body["paths"]["/ready"].is_object());
+    }
+
+    #[test]
+    fn role_resolution() {
+        assert_eq!(role_for("a", Some("a"), Some("v")), Some(Role::Admin));
+        assert_eq!(role_for("v", Some("a"), Some("v")), Some(Role::Viewer));
+        assert_eq!(role_for("x", Some("a"), Some("v")), None);
+        assert_eq!(role_for("a", None, Some("v")), None);
+    }
+
+    #[test]
+    fn rbac_by_method() {
+        use axum::http::Method;
+        // Viewer: read-only.
+        assert!(authorized(&Method::GET, Role::Viewer));
+        assert!(!authorized(&Method::PUT, Role::Viewer));
+        assert!(!authorized(&Method::DELETE, Role::Viewer));
+        // Admin: everything.
+        assert!(authorized(&Method::GET, Role::Admin));
+        assert!(authorized(&Method::PUT, Role::Admin));
+        assert!(authorized(&Method::DELETE, Role::Admin));
     }
 }

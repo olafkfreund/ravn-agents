@@ -9,8 +9,9 @@
 mod buffer;
 mod config;
 mod detection;
-mod inference;
 mod transport;
+
+use ravn_agent::inference;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

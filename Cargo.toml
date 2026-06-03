@@ -4,6 +4,7 @@ members = [
   "crates/ravn-core",
   "crates/ravn-agent",
   "crates/ravn-server",
+  "crates/ravn-eval",
 ]
 
 [workspace.package]
@@ -14,6 +15,7 @@ repository = "https://github.com/olafkfreund/ravn-agents"
 
 [workspace.dependencies]
 ravn-core = { path = "crates/ravn-core" }
+ravn-agent = { path = "crates/ravn-agent" }
 
 # Shared across crates — pinned once here to avoid version drift.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "process", "io-util"] }

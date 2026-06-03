@@ -12,7 +12,9 @@ use chrono::Utc;
 use ravn_core::{Event, Explanation, Payload};
 use serde::Deserialize;
 
-const SYSTEM_PROMPT: &str = "You are Ravn, a Linux operations assistant. Given a \
+/// System prompt sent with every explanation request. Public so the eval
+/// harness (#38) benchmarks the production system prompt verbatim.
+pub const SYSTEM_PROMPT: &str = "You are Ravn, a Linux operations assistant. Given a \
 flagged system event, explain in 2-3 plain sentences what most likely happened \
 and why it matters, then suggest ONE concrete command or check an operator can \
 run. Be factual and concise; do not invent details not supported by the event. \
@@ -94,7 +96,10 @@ impl InferenceClient {
 }
 
 /// Build the user prompt from an event, including a bounded slice of context.
-fn build_user_prompt(event: &Event) -> String {
+///
+/// Public so the eval harness (#38) benchmarks the exact prompt the agent
+/// sends, not a copy.
+pub fn build_user_prompt(event: &Event) -> String {
     let mut s = format!(
         "Severity: {:?}\nSource: {:?}\nHost: {}\nTitle: {}\n",
         event.severity,
@@ -150,7 +155,10 @@ fn build_user_prompt(event: &Event) -> String {
 
 /// Parse the model's content into (explanation, suggested_check), tolerating
 /// JSON wrapped in prose or missing fields.
-fn parse_explanation(content: &str) -> (String, Option<String>) {
+///
+/// Public so the eval harness (#38) scores responses with the same parser the
+/// agent uses in production.
+pub fn parse_explanation(content: &str) -> (String, Option<String>) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
         if let Some(parsed) = extract(&v) {
             return parsed;

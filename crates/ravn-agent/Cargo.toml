@@ -6,6 +6,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Library surface (reused by the eval harness, #38). Binary-private modules
+# (config, detection, transport, buffer) stay in the bin; only the
+# self-contained inference module is shared.
+[lib]
+name = "ravn_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ravnd"
 path = "src/main.rs"

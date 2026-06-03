@@ -23,7 +23,15 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        src = craneLib.cleanCargoSource ./.;
+        # Rust/Cargo sources, plus test fixture data files (#39) that
+        # cleanCargoSource would otherwise strip (it keeps only *.rs/Cargo.*).
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          name = "ravn-source";
+          filter = path: type:
+            (pkgs.lib.hasInfix "/tests/fixtures/" path)
+            || (craneLib.filterCargoSources path type);
+        };
 
         # Native deps for the Rust crates:
         #   pkg-config + openssl -> TLS for NATS/HTTP clients

@@ -1,0 +1,13 @@
+Severity: Notice
+Source: ConfigDrift
+Host: web-01
+Title: config changed: /etc/ssh/sshd_config
+Changed file: /etc/ssh/sshd_config
+Diff:
+--- a/etc/ssh/sshd_config
++++ b/etc/ssh/sshd_config
+@@ -32,7 +32,7 @@
+-PermitRootLogin no
++PermitRootLogin yes
+ PasswordAuthentication no
+

@@ -1,0 +1,16 @@
+{
+  "id": "019ed000-1000-7000-8000-000000000002",
+  "occurred_at": "2026-05-01T09:30:11Z",
+  "observed_at": "2026-05-01T09:30:11Z",
+  "agent_id": "019ed000-0000-7000-8000-0000000000aa",
+  "host": "web-01",
+  "severity": "warning",
+  "title": "sshd: maximum authentication attempts exceeded",
+  "category_hints": ["auth", "ssh"],
+  "payload": {
+    "kind": "journald",
+    "unit": "sshd.service",
+    "priority": 4,
+    "message": "error: maximum authentication attempts exceeded for root from 203.0.113.7 port 51234 ssh2 [preauth]"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "explanation": "nginx failed to start because another process already holds port 80, so the web server is down. systemd reports an exit-code failure after the bind() attempts.",
+  "suggested_check": "sudo ss -ltnp 'sport = :80'"
+}

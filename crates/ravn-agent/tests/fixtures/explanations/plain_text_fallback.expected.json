@@ -1,0 +1,4 @@
+{
+  "explanation": "The system update replaced several packages including openssl and nginx; no action is required unless services misbehave after the change.",
+  "suggested_check": null
+}

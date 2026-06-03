@@ -1,0 +1,6 @@
+Severity: Warning
+Source: Journald
+Host: web-01
+Title: sshd: maximum authentication attempts exceeded
+Unit: sshd.service
+Message: error: maximum authentication attempts exceeded for root from 203.0.113.7 port 51234 ssh2 [preauth]

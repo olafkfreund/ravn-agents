@@ -31,6 +31,10 @@ pub async fn run(state: AppState) {
             Ok(message) => {
                 if let Err(error) = db::insert_message(&state.pool, &message).await {
                     tracing::error!(%error, event_id = %message.event.id, "failed to persist message");
+                } else if let Err(error) =
+                    db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
+                {
+                    tracing::warn!(%error, "failed to update agent registry");
                 }
             }
             Err(error) => {

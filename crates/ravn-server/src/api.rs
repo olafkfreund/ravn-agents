@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::{IntoParams, OpenApi, ToSchema};
+use uuid::Uuid;
 
 use crate::db;
-use crate::db::StoredEvent;
+use crate::db::{Agent, CategoryDimension, StoredEvent};
 use crate::state::AppState;
 
 /// Maximum number of events returned in one page.
@@ -115,18 +116,78 @@ async fn list_events(
     Ok(Json(events))
 }
 
+/// List all registered agents with status and labels.
+#[utoipa::path(get, path = "/api/agents", tag = "agents",
+    responses((status = 200, description = "Registered agents", body = [Agent])))]
+async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> {
+    Ok(Json(db::list_agents(&state.pool).await?))
+}
+
+/// Fetch a single agent.
+#[utoipa::path(get, path = "/api/agents/{id}", tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent id")),
+    responses((status = 200, body = Agent), (status = 404, description = "Unknown agent")))]
+async fn get_agent(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    match db::get_agent(&state.pool, id).await {
+        Ok(Some(agent)) => Json(agent).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "agent not found").into_response(),
+        Err(error) => ApiError(error).into_response(),
+    }
+}
+
+/// Replace an agent's labels.
+#[utoipa::path(put, path = "/api/agents/{id}/labels", tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent id")),
+    request_body = std::collections::BTreeMap<String, String>,
+    responses((status = 200, body = Agent), (status = 404, description = "Unknown agent")))]
+async fn put_labels(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(labels): Json<BTreeMap<String, String>>,
+) -> Response {
+    match db::replace_labels(&state.pool, id, &labels).await {
+        Ok(false) => (StatusCode::NOT_FOUND, "agent not found").into_response(),
+        Ok(true) => match db::get_agent(&state.pool, id).await {
+            Ok(Some(agent)) => Json(agent).into_response(),
+            Ok(None) => (StatusCode::NOT_FOUND, "agent not found").into_response(),
+            Err(error) => ApiError(error).into_response(),
+        },
+        Err(error) => ApiError(error).into_response(),
+    }
+}
+
+/// Remove an agent and its labels.
+#[utoipa::path(delete, path = "/api/agents/{id}", tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent id")),
+    responses((status = 204, description = "Deleted"), (status = 404, description = "Unknown agent")))]
+async fn delete_agent(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    match db::delete_agent(&state.pool, id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "agent not found").into_response(),
+        Err(error) => ApiError(error).into_response(),
+    }
+}
+
+/// List grouping dimensions (label keys, values, and agent counts).
+#[utoipa::path(get, path = "/api/categories", tag = "agents",
+    responses((status = 200, description = "Grouping dimensions", body = [CategoryDimension])))]
+async fn list_categories(State(state): State<AppState>) -> Result<Json<Vec<CategoryDimension>>, ApiError> {
+    Ok(Json(db::list_categories(&state.pool).await?))
+}
+
 /// The OpenAPI specification for the control plane.
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, ready, list_events),
-    components(schemas(Health, Readiness, StoredEvent)),
+    paths(health, ready, list_events, list_agents, get_agent, put_labels, delete_agent, list_categories),
+    components(schemas(Health, Readiness, StoredEvent, Agent, CategoryDimension, crate::db::CategoryValue)),
     info(
         title = "Ravn control plane",
         description = "Ingests agent events, persists them, and serves the portal."
     ),
     tags(
         (name = "system", description = "Liveness and readiness probes"),
-        (name = "events", description = "Persisted detection events")
+        (name = "events", description = "Persisted detection events"),
+        (name = "agents", description = "Agent registry and categories")
     )
 )]
 pub struct ApiDoc;
@@ -148,6 +209,10 @@ pub fn router(state: AppState) -> Router {
     let stateful = Router::new()
         .route("/ready", get(ready))
         .route("/api/events", get(list_events))
+        .route("/api/agents", get(list_agents))
+        .route("/api/agents/{id}", get(get_agent).delete(delete_agent))
+        .route("/api/agents/{id}/labels", axum::routing::put(put_labels))
+        .route("/api/categories", get(list_categories))
         .with_state(state);
 
     system_router()

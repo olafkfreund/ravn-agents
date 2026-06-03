@@ -3,8 +3,10 @@
 //! Uses SQLx's runtime query API (not the `query!` macros) so the build needs
 //! no live database — important for the hermetic Nix build.
 
+use std::collections::BTreeMap;
+
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ravn_core::Message;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
@@ -106,6 +108,216 @@ pub async fn recent_events(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<Stor
     .context("querying recent events")?;
 
     Ok(rows)
+}
+
+/// A registered agent with its derived liveness status and labels.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct Agent {
+    pub agent_id: Uuid,
+    pub host: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    /// `online` | `stale` | `offline`, derived from `last_seen`.
+    pub status: String,
+    /// User-defined key/value labels.
+    pub labels: BTreeMap<String, String>,
+}
+
+/// One grouping dimension (label key) and its values.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CategoryDimension {
+    pub key: String,
+    pub values: Vec<CategoryValue>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CategoryValue {
+    pub value: String,
+    pub agent_count: i64,
+}
+
+#[derive(FromRow)]
+struct AgentRow {
+    agent_id: Uuid,
+    host: String,
+    first_seen: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+}
+
+#[derive(FromRow)]
+struct LabelRow {
+    agent_id: Uuid,
+    key: String,
+    value: String,
+}
+
+/// Liveness from last-seen age.
+fn agent_status(last_seen: DateTime<Utc>, now: DateTime<Utc>) -> &'static str {
+    let age = now - last_seen;
+    if age < Duration::seconds(60) {
+        "online"
+    } else if age < Duration::seconds(300) {
+        "stale"
+    } else {
+        "offline"
+    }
+}
+
+/// Record that an agent is alive (called on every ingested event).
+pub async fn touch_agent(pool: &PgPool, agent_id: Uuid, host: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agents (agent_id, host, last_seen) VALUES ($1, $2, now())
+        ON CONFLICT (agent_id) DO UPDATE SET host = EXCLUDED.host, last_seen = now()
+        "#,
+    )
+    .bind(agent_id)
+    .bind(host)
+    .execute(pool)
+    .await
+    .context("touching agent")?;
+    Ok(())
+}
+
+/// All registered agents with status and labels.
+pub async fn list_agents(pool: &PgPool) -> anyhow::Result<Vec<Agent>> {
+    let rows = sqlx::query_as::<_, AgentRow>(
+        "SELECT agent_id, host, first_seen, last_seen FROM agents ORDER BY host",
+    )
+    .fetch_all(pool)
+    .await
+    .context("listing agents")?;
+
+    let labels = sqlx::query_as::<_, LabelRow>("SELECT agent_id, key, value FROM agent_labels")
+        .fetch_all(pool)
+        .await
+        .context("loading labels")?;
+
+    let mut by_agent: BTreeMap<Uuid, BTreeMap<String, String>> = BTreeMap::new();
+    for l in labels {
+        by_agent.entry(l.agent_id).or_default().insert(l.key, l.value);
+    }
+
+    let now = Utc::now();
+    Ok(rows
+        .into_iter()
+        .map(|r| Agent {
+            status: agent_status(r.last_seen, now).to_string(),
+            labels: by_agent.remove(&r.agent_id).unwrap_or_default(),
+            agent_id: r.agent_id,
+            host: r.host,
+            first_seen: r.first_seen,
+            last_seen: r.last_seen,
+        })
+        .collect())
+}
+
+/// A single agent, or `None` if unknown.
+pub async fn get_agent(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Agent>> {
+    let Some(r) = sqlx::query_as::<_, AgentRow>(
+        "SELECT agent_id, host, first_seen, last_seen FROM agents WHERE agent_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("fetching agent")?
+    else {
+        return Ok(None);
+    };
+
+    let labels = sqlx::query_as::<_, LabelRow>(
+        "SELECT agent_id, key, value FROM agent_labels WHERE agent_id = $1",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .context("fetching labels")?;
+
+    Ok(Some(Agent {
+        status: agent_status(r.last_seen, Utc::now()).to_string(),
+        labels: labels.into_iter().map(|l| (l.key, l.value)).collect(),
+        agent_id: r.agent_id,
+        host: r.host,
+        first_seen: r.first_seen,
+        last_seen: r.last_seen,
+    }))
+}
+
+/// Replace an agent's labels. Returns `false` if the agent is unknown.
+pub async fn replace_labels(
+    pool: &PgPool,
+    id: Uuid,
+    labels: &BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT agent_id FROM agents WHERE agent_id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Ok(false);
+    }
+
+    sqlx::query("DELETE FROM agent_labels WHERE agent_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for (key, value) in labels {
+        sqlx::query("INSERT INTO agent_labels (agent_id, key, value) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(key)
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Delete an agent (cascades labels). Returns `false` if unknown.
+pub async fn delete_agent(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
+    let n = sqlx::query("DELETE FROM agents WHERE agent_id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("deleting agent")?
+        .rows_affected();
+    Ok(n > 0)
+}
+
+/// Grouping dimensions: each label key with its values and agent counts.
+pub async fn list_categories(pool: &PgPool) -> anyhow::Result<Vec<CategoryDimension>> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT key, value, count(*) FROM agent_labels GROUP BY key, value ORDER BY key, value",
+    )
+    .fetch_all(pool)
+    .await
+    .context("listing categories")?;
+
+    let mut dims: Vec<CategoryDimension> = Vec::new();
+    for (key, value, count) in rows {
+        match dims.last_mut() {
+            Some(d) if d.key == key => d.values.push(CategoryValue { value, agent_count: count }),
+            _ => dims.push(CategoryDimension {
+                key,
+                values: vec![CategoryValue { value, agent_count: count }],
+            }),
+        }
+    }
+    Ok(dims)
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn status_from_last_seen_age() {
+        let now = Utc::now();
+        assert_eq!(agent_status(now, now), "online");
+        assert_eq!(agent_status(now - Duration::seconds(120), now), "stale");
+        assert_eq!(agent_status(now - Duration::seconds(600), now), "offline");
+    }
 }
 
 /// Render a fieldless serde enum (Severity, Source) as its wire string,

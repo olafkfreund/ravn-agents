@@ -11,13 +11,35 @@ mod detection;
 mod inference;
 mod transport;
 
-use chrono::Utc;
-use ravn_core::{AgentId, Event, JournaldPayload, Message, Payload, Severity};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use ravn_core::{AgentId, Event, Heartbeat, JournaldPayload, Message, Payload, Severity};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use uuid::Uuid;
 
 use crate::config::Config;
 use crate::transport::Transport;
+
+/// Health state shared between the detection loop and the heartbeat task.
+#[derive(Clone)]
+struct Health {
+    started: Instant,
+    last_detection: Arc<Mutex<Option<DateTime<Utc>>>>,
+    published: Arc<AtomicU64>,
+}
+
+impl Health {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last_detection: Arc::new(Mutex::new(None)),
+            published: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -34,30 +56,62 @@ async fn main() -> anyhow::Result<()> {
         "ravnd starting"
     );
 
-    let transport = Transport::connect(&config.server_url, config.agent_id).await?;
+    let transport = Arc::new(Transport::connect(&config.server_url, config.agent_id).await?);
     tracing::info!("transport connected");
+
+    let health = Health::new();
 
     // Announce the agent is online (a journald-style "ravnd started" line).
     let startup = startup_message(&config);
     transport.publish(&startup).await?;
     tracing::info!(event_id = %startup.event.id, "published startup event");
 
+    // Heartbeat task: keeps the control plane's liveness fresh even when quiet.
+    spawn_heartbeat(&config, transport.clone(), health.clone());
+
     let any_tap = config.journald_enable
         || !config.config_drift_paths.is_empty()
         || config.failed_units_enable
         || config.updates_enable;
     if any_tap {
-        run_detection(&config, &transport).await;
+        run_detection(&config, transport, health).await;
     } else {
-        tracing::info!("no detection taps enabled; idling");
+        tracing::info!("no detection taps enabled; idling (heartbeat only)");
         shutdown_signal().await;
     }
 
     Ok(())
 }
 
+/// Periodically publish a heartbeat with agent health.
+fn spawn_heartbeat(config: &Config, transport: Arc<Transport>, health: Health) {
+    let agent_id = config.agent_id;
+    let host = config.host.clone();
+    let inference_enabled = config.inference_enable;
+    let interval = Duration::from_secs(config.heartbeat_interval_secs);
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            let hb = Heartbeat {
+                agent_id: AgentId(agent_id),
+                host: host.clone(),
+                sent_at: Utc::now(),
+                uptime_secs: health.started.elapsed().as_secs(),
+                last_detection: *health.last_detection.lock().unwrap(),
+                inference_enabled,
+                events_published: health.published.load(Ordering::Relaxed),
+            };
+            if let Err(error) = transport.publish_heartbeat(&hb).await {
+                tracing::debug!(%error, "heartbeat publish failed");
+            }
+        }
+    });
+}
+
 /// Run the detection taps, publishing each emitted event until shutdown.
-async fn run_detection(config: &Config, transport: &Transport) {
+async fn run_detection(config: &Config, transport: Arc<Transport>, health: Health) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(256);
 
     if config.journald_enable {
@@ -136,7 +190,6 @@ async fn run_detection(config: &Config, transport: &Transport) {
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
-    let mut published: u64 = 0;
 
     loop {
         tokio::select! {
@@ -149,7 +202,10 @@ async fn run_detection(config: &Config, transport: &Transport) {
                         }
                     }
                     match transport.publish(&message).await {
-                        Ok(()) => published += 1,
+                        Ok(()) => {
+                            health.published.fetch_add(1, Ordering::Relaxed);
+                            *health.last_detection.lock().unwrap() = Some(Utc::now());
+                        }
                         Err(error) => tracing::warn!(%error, "failed to publish event"),
                     }
                 }
@@ -158,7 +214,7 @@ async fn run_detection(config: &Config, transport: &Transport) {
         }
     }
 
-    tracing::info!(published, "detection loop ended");
+    tracing::info!(published = health.published.load(Ordering::Relaxed), "detection loop ended");
 }
 
 /// Build the one-off startup event.

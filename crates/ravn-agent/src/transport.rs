@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::SinkExt;
-use ravn_core::Message;
+use ravn_core::{Heartbeat, Message};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -42,12 +42,21 @@ impl Transport {
             Transport::Ws(t) => t.publish(message).await,
         }
     }
+
+    /// Publish a heartbeat (separate subject from messages).
+    pub async fn publish_heartbeat(&self, hb: &Heartbeat) -> anyhow::Result<()> {
+        match self {
+            Transport::Nats(t) => t.publish_heartbeat(hb).await,
+            Transport::Ws(t) => t.publish_heartbeat(hb).await,
+        }
+    }
 }
 
 /// NATS transport. async-nats reconnects automatically with backoff.
 pub struct NatsTransport {
     client: async_nats::Client,
     subject: String,
+    heartbeat_subject: String,
 }
 
 impl NatsTransport {
@@ -61,13 +70,22 @@ impl NatsTransport {
         Ok(Self {
             client,
             subject: format!("ravn.messages.{agent_id}"),
+            heartbeat_subject: format!("ravn.heartbeat.{agent_id}"),
         })
     }
 
     pub async fn publish(&self, message: &Message) -> anyhow::Result<()> {
-        let payload = serde_json::to_vec(message).context("serializing message")?;
+        self.publish_to(&self.subject, message).await
+    }
+
+    pub async fn publish_heartbeat(&self, hb: &Heartbeat) -> anyhow::Result<()> {
+        self.publish_to(&self.heartbeat_subject, hb).await
+    }
+
+    async fn publish_to<T: serde::Serialize>(&self, subject: &str, value: &T) -> anyhow::Result<()> {
+        let payload = serde_json::to_vec(value).context("serializing payload")?;
         self.client
-            .publish(self.subject.clone(), payload.into())
+            .publish(subject.to_string(), payload.into())
             .await
             .context("publishing to NATS")?;
         // Our emissions are bursty and the process may be short-lived, so flush
@@ -92,7 +110,15 @@ impl WsTransport {
     }
 
     pub async fn publish(&self, message: &Message) -> anyhow::Result<()> {
-        let text = serde_json::to_string(message).context("serializing message")?;
+        self.send_json(message).await
+    }
+
+    pub async fn publish_heartbeat(&self, hb: &Heartbeat) -> anyhow::Result<()> {
+        self.send_json(hb).await
+    }
+
+    async fn send_json<T: serde::Serialize>(&self, value: &T) -> anyhow::Result<()> {
+        let text = serde_json::to_string(value).context("serializing payload")?;
         let mut stream = self.stream.lock().await;
 
         if let Err(error) = stream.send(WsMessage::text(text.clone())).await {

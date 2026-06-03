@@ -48,6 +48,8 @@ pub struct Config {
     pub inference_model: String,
     /// Per-request inference timeout (seconds).
     pub inference_timeout_secs: u64,
+    /// How often (seconds) to publish a heartbeat (#20).
+    pub heartbeat_interval_secs: u64,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -225,6 +227,10 @@ impl Config {
             inference_endpoint,
             inference_model,
             inference_timeout_secs,
+            heartbeat_interval_secs: env_var("RAVN_HEARTBEAT_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15)
+                .max(1),
         })
     }
 }

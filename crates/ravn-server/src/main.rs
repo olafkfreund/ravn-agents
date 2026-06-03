@@ -36,8 +36,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app_state = AppState { pool, nats };
 
-    // Spawn the ingestion loop (NATS -> validate -> persist).
+    // Spawn the ingestion loops (events + heartbeats).
     tokio::spawn(ingest::run(app_state.clone()));
+    tokio::spawn(ingest::run_heartbeats(app_state.clone()));
 
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await

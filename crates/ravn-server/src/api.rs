@@ -250,6 +250,31 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+/// Prometheus metrics in text exposition format (#40). Public.
+async fn metrics(State(state): State<AppState>) -> Response {
+    if let Ok(agents) = db::list_agents(&state.pool).await {
+        let (mut online, mut stale, mut offline) = (0i64, 0i64, 0i64);
+        for a in &agents {
+            match a.status.as_str() {
+                "online" => online += 1,
+                "stale" => stale += 1,
+                _ => offline += 1,
+            }
+        }
+        state.metrics.set_agent_counts(online, stale, offline);
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.encode(),
+    )
+        .into_response()
+}
+
+/// Endpoints reachable without auth even when tokens are configured.
+fn is_public(path: &str) -> bool {
+    matches!(path, "/ready" | "/metrics")
+}
+
 /// API access role (#26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -278,6 +303,9 @@ fn authorized(method: &axum::http::Method, role: Role) -> bool {
 async fn auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if state.admin_token.is_none() && state.viewer_token.is_none() {
         return next.run(req).await; // auth disabled
+    }
+    if is_public(req.uri().path()) {
+        return next.run(req).await; // probes + metrics are public
     }
 
     let token = req
@@ -317,6 +345,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/categories", get(list_categories))
         .route("/api/topology", get(topology))
         .route("/ws/events", get(ws_events))
+        .route("/metrics", get(metrics))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

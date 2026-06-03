@@ -8,6 +8,7 @@ mod api;
 mod config;
 mod db;
 mod ingest;
+mod metrics;
 mod state;
 
 use anyhow::Context;
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         events_tx,
         admin_token: config.admin_token.clone(),
         viewer_token: config.viewer_token.clone(),
+        metrics: std::sync::Arc::new(metrics::Metrics::new()),
     };
 
     // Spawn the ingestion loops (events + heartbeats).

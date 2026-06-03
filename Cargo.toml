@@ -16,7 +16,7 @@ repository = "https://github.com/olafkfreund/ravn-agents"
 ravn-core = { path = "crates/ravn-core" }
 
 # Shared across crates — pinned once here to avoid version drift.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 serde = { version = "1", features = ["derive"] }

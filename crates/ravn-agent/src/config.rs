@@ -50,6 +50,10 @@ pub struct Config {
     pub inference_timeout_secs: u64,
     /// How often (seconds) to publish a heartbeat (#20).
     pub heartbeat_interval_secs: u64,
+    /// Path to the local SQLite offline buffer (#21).
+    pub buffer_path: String,
+    /// Max buffered messages before the oldest are pruned.
+    pub buffer_max: usize,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -231,6 +235,16 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15)
                 .max(1),
+            buffer_path: env_var("RAVN_BUFFER_PATH").unwrap_or_else(|| {
+                // Prefer systemd's StateDirectory when present.
+                match env_var("STATE_DIRECTORY") {
+                    Some(dir) => format!("{dir}/outbox.db"),
+                    None => "ravn-outbox.db".to_string(),
+                }
+            }),
+            buffer_max: env_var("RAVN_BUFFER_MAX")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10_000),
         })
     }
 }

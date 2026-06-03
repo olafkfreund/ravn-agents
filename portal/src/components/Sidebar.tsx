@@ -9,7 +9,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: "/events", label: "Events", glyph: "◈" },
-  { to: "/agents", label: "Agents", glyph: "❖", soon: true },
+  { to: "/agents", label: "Agents", glyph: "❖" },
   { to: "/topology", label: "Topology", glyph: "⬡", soon: true },
 ];
 

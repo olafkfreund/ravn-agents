@@ -3,6 +3,10 @@ import type { components, paths } from "../api/schema";
 
 /** A persisted event, as returned by the control plane. */
 export type StoredEvent = components["schemas"]["StoredEvent"];
+/** A registered agent with status and labels. */
+export type Agent = components["schemas"]["Agent"];
+/** A grouping dimension (label key + values). */
+export type CategoryDimension = components["schemas"]["CategoryDimension"];
 
 /** Typed control-plane client, generated from the server's OpenAPI spec.
  *  baseUrl is empty: in dev, Vite proxies /api to the backend; in prod the
@@ -15,5 +19,19 @@ export async function listEvents(limit = 100): Promise<StoredEvent[]> {
     params: { query: { limit } },
   });
   if (error) throw new Error("Failed to load events");
+  return data ?? [];
+}
+
+/** Fetch all registered agents. */
+export async function listAgents(): Promise<Agent[]> {
+  const { data, error } = await api.GET("/api/agents", {});
+  if (error) throw new Error("Failed to load agents");
+  return data ?? [];
+}
+
+/** Fetch grouping dimensions (label keys + values). */
+export async function listCategories(): Promise<CategoryDimension[]> {
+  const { data, error } = await api.GET("/api/categories", {});
+  if (error) throw new Error("Failed to load categories");
   return data ?? [];
 }

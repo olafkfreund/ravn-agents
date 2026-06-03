@@ -8,6 +8,7 @@
 
 mod config;
 mod detection;
+mod inference;
 mod transport;
 
 use chrono::Utc;
@@ -121,6 +122,18 @@ async fn run_detection(config: &Config, transport: &Transport) {
     // Close the original sender so the loop ends once all taps stop.
     drop(tx);
 
+    // Optional local inference: enrich events with an explanation before
+    // publishing. Best-effort with a timeout — a slow/down model never blocks
+    // the alarm, only its wording.
+    let inference = config.inference_enable.then(|| {
+        tracing::info!(endpoint = %config.inference_endpoint, "inference enrichment enabled");
+        inference::InferenceClient::new(
+            config.inference_endpoint.clone(),
+            config.inference_model.clone(),
+            std::time::Duration::from_secs(config.inference_timeout_secs),
+        )
+    });
+
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut published: u64 = 0;
@@ -129,10 +142,17 @@ async fn run_detection(config: &Config, transport: &Transport) {
         tokio::select! {
             _ = &mut shutdown => break,
             maybe = rx.recv() => match maybe {
-                Some(message) => match transport.publish(&message).await {
-                    Ok(()) => published += 1,
-                    Err(error) => tracing::warn!(%error, "failed to publish event"),
-                },
+                Some(mut message) => {
+                    if let Some(client) = &inference {
+                        if message.explanation.is_none() {
+                            message.explanation = client.explain(&message.event).await;
+                        }
+                    }
+                    match transport.publish(&message).await {
+                        Ok(()) => published += 1,
+                        Err(error) => tracing::warn!(%error, "failed to publish event"),
+                    }
+                }
                 None => break, // tap ended
             },
         }

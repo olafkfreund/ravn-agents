@@ -6,6 +6,7 @@
 //! (epic #3) hang off this. For now the daemon emits one startup event so the
 //! agent → server → store thread is demonstrable end to end.
 
+mod buffer;
 mod config;
 mod detection;
 mod inference;
@@ -61,20 +62,48 @@ async fn main() -> anyhow::Result<()> {
 
     let health = Health::new();
 
+    // Local offline buffer: durably queue events when the control plane is
+    // unreachable; a flush task drains it on reconnect (#21).
+    let buffer = match buffer::Buffer::open(&config.buffer_path, config.buffer_max) {
+        Ok(b) => {
+            if let Ok(n) = b.len() {
+                if n > 0 {
+                    tracing::info!(buffered = n, "offline buffer has pending events");
+                }
+            }
+            Some(Arc::new(b))
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %config.buffer_path, "offline buffer disabled");
+            None
+        }
+    };
+
     // Announce the agent is online (a journald-style "ravnd started" line).
     let startup = startup_message(&config);
-    transport.publish(&startup).await?;
-    tracing::info!(event_id = %startup.event.id, "published startup event");
+    if let Err(error) = transport.publish(&startup).await {
+        tracing::warn!(%error, "buffering startup event");
+        if let Some(b) = &buffer {
+            let _ = b.enqueue(&startup);
+        }
+    } else {
+        tracing::info!(event_id = %startup.event.id, "published startup event");
+    }
 
     // Heartbeat task: keeps the control plane's liveness fresh even when quiet.
     spawn_heartbeat(&config, transport.clone(), health.clone());
+
+    // Flush task: drain the offline buffer to the control plane.
+    if let Some(b) = &buffer {
+        spawn_flush(transport.clone(), b.clone());
+    }
 
     let any_tap = config.journald_enable
         || !config.config_drift_paths.is_empty()
         || config.failed_units_enable
         || config.updates_enable;
     if any_tap {
-        run_detection(&config, transport, health).await;
+        run_detection(&config, transport, health, buffer).await;
     } else {
         tracing::info!("no detection taps enabled; idling (heartbeat only)");
         shutdown_signal().await;
@@ -110,8 +139,37 @@ fn spawn_heartbeat(config: &Config, transport: Arc<Transport>, health: Health) {
     });
 }
 
+/// Periodically drain the offline buffer to the control plane.
+fn spawn_flush(transport: Arc<Transport>, buffer: Arc<buffer::Buffer>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            match buffer.drain_batch(100) {
+                Ok(batch) if !batch.is_empty() => {
+                    for (id, message) in batch {
+                        match transport.publish(&message).await {
+                            Ok(()) => {
+                                let _ = buffer.delete(&id);
+                            }
+                            Err(_) => break, // still unreachable; retry next tick
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "buffer drain failed"),
+            }
+        }
+    });
+}
+
 /// Run the detection taps, publishing each emitted event until shutdown.
-async fn run_detection(config: &Config, transport: Arc<Transport>, health: Health) {
+async fn run_detection(
+    config: &Config,
+    transport: Arc<Transport>,
+    health: Health,
+    buffer: Option<Arc<buffer::Buffer>>,
+) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(256);
 
     if config.journald_enable {
@@ -206,7 +264,19 @@ async fn run_detection(config: &Config, transport: Arc<Transport>, health: Healt
                             health.published.fetch_add(1, Ordering::Relaxed);
                             *health.last_detection.lock().unwrap() = Some(Utc::now());
                         }
-                        Err(error) => tracing::warn!(%error, "failed to publish event"),
+                        Err(error) => {
+                            // Buffer for later instead of dropping the alarm.
+                            match &buffer {
+                                Some(b) => {
+                                    if let Err(e) = b.enqueue(&message) {
+                                        tracing::warn!(error = %e, "failed to buffer event");
+                                    } else {
+                                        tracing::warn!(%error, "publish failed; buffered event");
+                                    }
+                                }
+                                None => tracing::warn!(%error, "failed to publish event (no buffer)"),
+                            }
+                        }
                     }
                 }
                 None => break, // tap ended

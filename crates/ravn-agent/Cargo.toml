@@ -30,3 +30,4 @@ hex = "0.4"
 similar = "2"
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

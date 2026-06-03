@@ -5,6 +5,8 @@
 //! override it. A stable agent identity is established at enrollment (#19);
 //! until then it comes from `RAVN_AGENT_ID` or is generated per start.
 
+use std::path::PathBuf;
+
 use anyhow::Context;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -26,6 +28,8 @@ pub struct Config {
     pub journald_min_priority: u8,
     /// Whether the auth/SSH/audit classifier (#12) is enabled.
     pub auth_enable: bool,
+    /// Paths watched for config drift (#11); empty disables the watcher.
+    pub config_drift_paths: Vec<PathBuf>,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -55,6 +59,14 @@ struct FileDetection {
     journald: FileJournald,
     #[serde(default)]
     auth: FileAuth,
+    #[serde(default)]
+    config_drift: FileConfigDrift,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileConfigDrift {
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +119,17 @@ impl Config {
             .or(file.detection.auth.enable)
             .unwrap_or(true);
 
+        // Env (comma/colon separated) takes precedence over the config file.
+        let config_drift_paths: Vec<PathBuf> = match env_var("RAVN_CONFIG_DRIFT_PATHS") {
+            Some(raw) => raw
+                .split([',', ':'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+            None => file.detection.config_drift.paths.into_iter().map(PathBuf::from).collect(),
+        };
+
         Ok(Self {
             server_url,
             agent_id,
@@ -115,6 +138,7 @@ impl Config {
             journald_enable,
             journald_min_priority,
             auth_enable,
+            config_drift_paths,
         })
     }
 }

@@ -4,4 +4,5 @@
 //! independent of any LLM, and emits normalized `ravn-core` events.
 
 pub mod auth;
+pub mod config_drift;
 pub mod journald;

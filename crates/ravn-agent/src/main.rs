@@ -41,10 +41,11 @@ async fn main() -> anyhow::Result<()> {
     transport.publish(&startup).await?;
     tracing::info!(event_id = %startup.event.id, "published startup event");
 
-    if config.journald_enable {
+    let any_tap = config.journald_enable || !config.config_drift_paths.is_empty();
+    if any_tap {
         run_detection(&config, &transport).await;
     } else {
-        tracing::info!("journald tap disabled; idling");
+        tracing::info!("no detection taps enabled; idling");
         shutdown_signal().await;
     }
 
@@ -55,17 +56,37 @@ async fn main() -> anyhow::Result<()> {
 async fn run_detection(config: &Config, transport: &Transport) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(256);
 
-    let tap = detection::journald::JournaldTap {
-        agent_id: config.agent_id,
-        host: config.host.clone(),
-        min_priority: config.journald_min_priority,
-        auth_enable: config.auth_enable,
-    };
-    tokio::spawn(async move {
-        if let Err(error) = tap.run(tx).await {
-            tracing::error!(%error, "journald tap exited");
-        }
-    });
+    if config.journald_enable {
+        let tap = detection::journald::JournaldTap {
+            agent_id: config.agent_id,
+            host: config.host.clone(),
+            min_priority: config.journald_min_priority,
+            auth_enable: config.auth_enable,
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = tap.run(tx).await {
+                tracing::error!(%error, "journald tap exited");
+            }
+        });
+    }
+
+    if !config.config_drift_paths.is_empty() {
+        let tap = detection::config_drift::ConfigDriftTap {
+            agent_id: config.agent_id,
+            host: config.host.clone(),
+            paths: config.config_drift_paths.clone(),
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = tap.run(tx).await {
+                tracing::error!(%error, "config-drift tap exited");
+            }
+        });
+    }
+
+    // Close the original sender so the loop ends once all taps stop.
+    drop(tx);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);

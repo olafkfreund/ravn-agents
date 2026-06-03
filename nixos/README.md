@@ -86,6 +86,33 @@ services.ravn.agent.inference = {
 `path` nor `url` is set, no llama-server unit is created and the agent simply
 emits events without explanations (safe failure — detection never waits on it).
 
+### Resource caps & bench hook (#18)
+
+The `ravn-inference` slice caps CPU and memory (`cpuQuota`, `memoryMax`); the
+`ravn-llama` process additionally runs at a lower scheduling priority so it
+never competes with interactive work:
+
+```nix
+services.ravn.agent.inference = {
+  threads = 0;                       # 0 = host physical cores (avoids SMT oversubscription)
+  nice = 5;                          # process Nice priority
+  ioSchedulingClass = "best-effort"; # none | realtime | best-effort | idle
+  ioSchedulingPriority = 6;          # 0 (highest) .. 7 (lowest); best-effort/realtime only
+
+  # Opt-in: sample llama-server throughput on a timer, appended as JSONL.
+  bench = {
+    enable = true;
+    interval = "1h";                            # systemd time span
+    outputFile = "/var/lib/ravn-bench/bench.jsonl";
+  };
+};
+```
+
+`threads = 0` resolves the physical-core count at runtime (the target's CPU is
+unknown at evaluation time). The bench hook records
+`{ts, model, tokens_per_sec}` per tick, feeding the eval epic (#8) with on-host
+throughput trends — pair it with the `ravn-eval` harness for model comparison.
+
 ## Trying it out
 
 `nixosConfigurations.demo-agent` is a minimal example machine (container

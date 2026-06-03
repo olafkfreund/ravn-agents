@@ -19,6 +19,52 @@ let
     else null;
 
   inferenceEndpoint = "http://${cfg.inference.host}:${toString cfg.inference.port}";
+
+  # Start wrapper for llama-server (#18). When `threads = 0` it picks the
+  # number of *physical* cores at runtime (avoiding SMT oversubscription, which
+  # hurts llama.cpp throughput), since the target's core count is unknown at Nix
+  # eval time. A non-zero `threads` is honoured verbatim.
+  llamaStart = pkgs.writeShellApplication {
+    name = "ravn-llama-start";
+    runtimeInputs = with pkgs; [ coreutils gawk ];
+    text = ''
+      threads=${toString cfg.inference.threads}
+      if [ "$threads" -le 0 ]; then
+        threads=$(awk -F: '/^physical id/{p=$2} /^core id/{print p":"$2}' \
+          /proc/cpuinfo | sort -u | wc -l)
+        [ "$threads" -ge 1 ] || threads=$(nproc)
+      fi
+      exec ${cfg.inference.package}/bin/llama-server \
+        --model ${toString inferenceModelFile} \
+        --host ${cfg.inference.host} \
+        --port ${toString cfg.inference.port} \
+        --ctx-size ${toString cfg.inference.contextSize} \
+        --metrics \
+        --threads "$threads"
+    '';
+  };
+
+  # Small host bench hook (#18): one inference call, append tokens/sec as JSONL.
+  # Feeds the eval epic (#8) with on-host throughput over time.
+  benchScript = pkgs.writeShellApplication {
+    name = "ravn-bench";
+    runtimeInputs = with pkgs; [ curl jq coreutils ];
+    text = ''
+      endpoint="${inferenceEndpoint}"
+      model="${cfg.inference.model.name}"
+      out="${cfg.inference.bench.outputFile}"
+      body=$(jq -nc --arg m "$model" \
+        '{model:$m, messages:[{role:"user", content:"Reply with OK."}], max_tokens:16}')
+      resp=$(curl -fsS "$endpoint/v1/chat/completions" \
+        -H 'content-type: application/json' -d "$body") || {
+        echo "ravn-bench: inference request failed" >&2; exit 1; }
+      tps=$(printf '%s' "$resp" | jq -r '.timings.predicted_per_second // empty')
+      ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      printf '{"ts":"%s","model":"%s","tokens_per_sec":%s}\n' \
+        "$ts" "$model" "''${tps:-null}" >> "$out"
+      echo "ravn-bench: $model ''${tps:-?} tok/s -> $out"
+    '';
+  };
 in
 {
   options.services.ravn.agent = {
@@ -140,7 +186,11 @@ in
       threads = mkOption {
         type = types.ints.unsigned;
         default = 0;
-        description = "Inference threads (`--threads`); 0 lets llama.cpp choose.";
+        description = ''
+          Inference threads (`--threads`). 0 (the default) selects the host's
+          physical core count at runtime — avoiding SMT oversubscription, which
+          degrades llama.cpp throughput (#18). Set a positive value to override.
+        '';
       };
 
       cpuQuota = mkOption {
@@ -153,6 +203,50 @@ in
         type = types.str;
         default = "2G";
         description = "`MemoryMax` applied to the inference slice (#18).";
+      };
+      nice = mkOption {
+        type = types.ints.between (-20) 19;
+        default = 5;
+        description = ''
+          `Nice` priority for the llama-server process (#18). A small positive
+          value keeps inference from competing with interactive/foreground work.
+        '';
+      };
+      ioSchedulingClass = mkOption {
+        type = types.enum [ "none" "realtime" "best-effort" "idle" ];
+        default = "best-effort";
+        description = "`IOSchedulingClass` for the inference process (#18).";
+      };
+      ioSchedulingPriority = mkOption {
+        type = types.ints.between 0 7;
+        default = 6;
+        description = ''
+          `IOSchedulingPriority` (0 = highest, 7 = lowest) for the inference
+          process; applies only to the `realtime`/`best-effort` classes (#18).
+        '';
+      };
+
+      bench = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Periodically record llama-server throughput (tokens/sec) to a host
+            file, feeding the eval epic (#8/#18). Off by default — it issues a
+            real (tiny) inference request on each tick.
+          '';
+        };
+        interval = mkOption {
+          type = types.str;
+          default = "1h";
+          example = "15min";
+          description = "How often to sample, as a systemd time span (`OnUnitActiveSec`).";
+        };
+        outputFile = mkOption {
+          type = types.path;
+          default = "/var/lib/ravn-bench/bench.jsonl";
+          description = "JSONL file the bench hook appends `{ts,model,tokens_per_sec}` to.";
+        };
       };
     };
 
@@ -217,16 +311,22 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       serviceConfig = {
-        ExecStart = lib.concatStringsSep " " ([
-          "${cfg.inference.package}/bin/llama-server"
-          "--model ${inferenceModelFile}"
-          "--host ${cfg.inference.host}"
-          "--port ${toString cfg.inference.port}"
-          "--ctx-size ${toString cfg.inference.contextSize}"
-        ] ++ optional (cfg.inference.threads > 0) "--threads ${toString cfg.inference.threads}");
+        # Wrapper resolves physical-core thread count at runtime (#18).
+        ExecStart = lib.getExe llamaStart;
         Restart = "on-failure";
         RestartSec = 5;
         Slice = "ravn-inference.slice";
+
+        # Keep inference below interactive/foreground work (#18). CPU/memory
+        # ceilings live on the slice; scheduling priority is per-process.
+        Nice = cfg.inference.nice;
+        IOSchedulingClass = cfg.inference.ioSchedulingClass;
+      } // optionalAttrs
+        (cfg.inference.ioSchedulingClass == "realtime"
+          || cfg.inference.ioSchedulingClass == "best-effort")
+        {
+          IOSchedulingPriority = cfg.inference.ioSchedulingPriority;
+        } // {
 
         DynamicUser = true;
         NoNewPrivileges = true;
@@ -253,6 +353,47 @@ in
         UMask = "0077";
       };
     };
+
+    # Bench hook (#18): sample llama-server tokens/sec on a timer, appending to
+    # a host JSONL file. Opt-in; only meaningful once a model is served.
+    systemd.services.ravn-bench = mkIf
+      (cfg.inference.enable && cfg.inference.bench.enable && inferenceModelFile != null)
+      {
+        description = "Ravn inference throughput sample";
+        after = [ "ravn-llama.service" ];
+        wants = [ "ravn-llama.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = lib.getExe benchScript;
+          DynamicUser = true;
+          StateDirectory = "ravn-bench";
+          # Restrict to the directory holding the output file.
+          ReadWritePaths = [ (builtins.dirOf cfg.inference.bench.outputFile) ];
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+          IPAddressAllow = "localhost";
+          IPAddressDeny = "any";
+          SystemCallArchitectures = "native";
+          SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+          UMask = "0077";
+        };
+      };
+
+    systemd.timers.ravn-bench = mkIf
+      (cfg.inference.enable && cfg.inference.bench.enable && inferenceModelFile != null)
+      {
+        description = "Schedule Ravn inference throughput samples";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnBootSec = "5min";
+          OnUnitActiveSec = cfg.inference.bench.interval;
+          Unit = "ravn-bench.service";
+        };
+      };
 
     systemd.services.ravnd = {
       description = "Ravn detection agent";

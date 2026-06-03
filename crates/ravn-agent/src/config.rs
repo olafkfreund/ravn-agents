@@ -40,6 +40,14 @@ pub struct Config {
     pub nix_profile: PathBuf,
     /// How often (seconds) the update tap polls the profile.
     pub update_poll_secs: u64,
+    /// Whether to call local inference to explain events (#16).
+    pub inference_enable: bool,
+    /// OpenAI-compatible inference endpoint (llama-server).
+    pub inference_endpoint: String,
+    /// Model name sent to the inference endpoint.
+    pub inference_model: String,
+    /// Per-request inference timeout (seconds).
+    pub inference_timeout_secs: u64,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -51,6 +59,8 @@ struct FileConfig {
     log: FileLog,
     #[serde(default)]
     detection: FileDetection,
+    #[serde(default)]
+    inference: FileInference,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,6 +85,13 @@ struct FileDetection {
     failed_units: FileFailedUnits,
     #[serde(default)]
     updates: FileUpdates,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileInference {
+    enable: Option<bool>,
+    endpoint: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,6 +190,23 @@ impl Config {
             .unwrap_or(30)
             .max(1);
 
+        let inference_enable = env_bool("RAVN_INFERENCE")
+            .or(file.inference.enable)
+            .unwrap_or(false);
+
+        let inference_endpoint = env_var("RAVN_INFERENCE_ENDPOINT")
+            .or(file.inference.endpoint)
+            .unwrap_or_else(|| "http://127.0.0.1:18181".to_string());
+
+        let inference_model = env_var("RAVN_INFERENCE_MODEL")
+            .or(file.inference.model)
+            .unwrap_or_else(|| "qwen3-1.7b-q4_k_m".to_string());
+
+        let inference_timeout_secs = env_var("RAVN_INFERENCE_TIMEOUT_SECS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15)
+            .max(1);
+
         Ok(Self {
             server_url,
             agent_id,
@@ -187,6 +221,10 @@ impl Config {
             updates_enable,
             nix_profile,
             update_poll_secs,
+            inference_enable,
+            inference_endpoint,
+            inference_model,
+            inference_timeout_secs,
         })
     }
 }

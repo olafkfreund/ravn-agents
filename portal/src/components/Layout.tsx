@@ -1,41 +1,30 @@
-import { NavLink, Outlet } from "react-router-dom";
-import { ThemeToggle } from "./ThemeToggle";
+import { useState } from "react";
+import { useLocation, Outlet } from "react-router-dom";
+import { Sidebar } from "./Sidebar";
+import { Topbar } from "./Topbar";
 
-const navClass = ({ isActive }: { isActive: boolean }) =>
-  `text-sm transition-colors hover:text-accent ${
-    isActive ? "text-accent font-semibold" : "text-fg-soft"
-  }`;
+const TITLES: Record<string, string> = {
+  "/events": "Events",
+  "/agents": "Agents",
+  "/topology": "Topology",
+};
 
 export function Layout() {
-  return (
-    <div className="min-h-full">
-      <header className="sticky top-0 z-20 border-b border-border bg-bg/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center gap-6 px-5 py-3">
-          <a href="/" className="flex items-center gap-2 font-extrabold text-fg">
-            <span aria-hidden="true">🐦‍⬛</span>
-            <span>Ravn</span>
-            <span className="text-muted font-normal">Portal</span>
-          </a>
-          <nav className="flex items-center gap-5">
-            <NavLink to="/events" className={navClass}>
-              Events
-            </NavLink>
-          </nav>
-          <div className="ml-auto flex items-center gap-3">
-            <a
-              href="https://github.com/olafkfreund/ravn-agents"
-              className="text-sm text-fg-soft hover:text-accent"
-            >
-              GitHub ↗
-            </a>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
+  const [navOpen, setNavOpen] = useState(false);
+  const { pathname } = useLocation();
+  const title = TITLES[pathname] ?? "Ravn";
 
-      <main className="mx-auto max-w-6xl px-5 py-8">
-        <Outlet />
-      </main>
+  return (
+    <div className="flex h-full">
+      <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Topbar title={title} live onMenu={() => setNavOpen(true)} />
+        <main className="flex-1 overflow-y-auto px-4 py-6 md:px-6 lg:px-8">
+          <div className="mx-auto max-w-[1400px]">
+            <Outlet />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

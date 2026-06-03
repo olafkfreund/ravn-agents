@@ -2,41 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Gruvbox palette, matching the marketing site. Light is :root; dark overrides
-   via [data-theme="dark"]. An inline script in index.html sets the attribute
-   before first paint. */
+/* ── Ravn operator console — design tokens ─────────────────────────────────
+   Command-console aesthetic: dark-first, Gruvbox-rooted, refined. Palette is
+   stored as space-separated RGB channels so Tailwind opacity modifiers
+   (bg-accent/10, etc.) work via rgb(var(--x) / <alpha-value>). Light is the
+   :root default; [data-theme="dark"] overrides. */
 :root {
-  --bg: #fbf1c7;
-  --bg-soft: #f2e5bc;
-  --bg-elev: #ebdbb2;
-  --border: #d5c4a1;
-  --fg: #3c3836;
-  --fg-soft: #504945;
-  --muted: #7c6f64;
-  --accent: #af3a03;
-  --accent-2: #427b58;
-  --link: #076678;
-  --red: #9d0006;
-  --yellow: #b57614;
-  --green: #79740e;
-  --blue: #076678;
+  --bg: 245 237 214;
+  --surface: 251 241 199;
+  --surface-2: 242 229 188;
+  --elev: 235 219 178;
+  --line: 213 196 161;
+  --line-soft: 230 216 176;
+  --fg: 40 40 40;
+  --fg-dim: 80 73 69;
+  --fg-mute: 124 111 100;
+  --accent: 175 58 3;
+  --accent-2: 66 123 88;
+
+  --sev-info: 7 102 120;
+  --sev-notice: 66 123 88;
+  --sev-warning: 181 118 20;
+  --sev-error: 175 58 3;
+  --sev-critical: 157 0 6;
+
+  --shadow-card: 0 1px 2px rgba(40, 40, 40, 0.06), 0 2px 8px rgba(40, 40, 40, 0.04);
+  --shadow-drawer: -16px 0 48px rgba(40, 40, 40, 0.18);
+  --pulse-color: rgba(66, 123, 88, 0.5);
+  --grid-line: rgba(60, 56, 54, 0.045);
+  --glow: rgba(175, 58, 3, 0.06);
 }
 
 [data-theme="dark"] {
-  --bg: #282828;
-  --bg-soft: #32302f;
-  --bg-elev: #3c3836;
-  --border: #504945;
-  --fg: #ebdbb2;
-  --fg-soft: #d5c4a1;
-  --muted: #928374;
-  --accent: #fe8019;
-  --accent-2: #8ec07c;
-  --link: #83a598;
-  --red: #fb4934;
-  --yellow: #fabd2f;
-  --green: #b8bb26;
-  --blue: #83a598;
+  --bg: 29 32 33;
+  --surface: 40 40 40;
+  --surface-2: 50 48 47;
+  --elev: 60 56 54;
+  --line: 80 73 69;
+  --line-soft: 60 56 54;
+  --fg: 235 219 178;
+  --fg-dim: 213 196 161;
+  --fg-mute: 146 131 116;
+  --accent: 254 128 25;
+  --accent-2: 142 192 124;
+
+  --sev-info: 131 165 152;
+  --sev-notice: 184 187 38;
+  --sev-warning: 250 189 47;
+  --sev-error: 254 128 25;
+  --sev-critical: 251 73 52;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 12px rgba(0, 0, 0, 0.25);
+  --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.5);
+  --pulse-color: rgba(142, 192, 124, 0.4);
+  --grid-line: rgba(235, 219, 178, 0.035);
+  --glow: rgba(254, 128, 25, 0.07);
+}
+
+* {
+  box-sizing: border-box;
 }
 
 html,
@@ -47,7 +71,58 @@ body,
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
+  background-color: rgb(var(--bg));
+  background-image:
+    radial-gradient(900px 500px at 0% -5%, var(--glow), transparent 70%),
+    radial-gradient(var(--grid-line) 1px, transparent 1px);
+  background-size: 100% 100%, 22px 22px;
+  color: rgb(var(--fg));
   font-family: theme("fontFamily.sans");
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgb(var(--accent));
+  color: rgb(var(--bg));
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--line)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--line));
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--fg-mute));
+  background-clip: padding-box;
+}
+
+@layer components {
+  .focus-ring:focus-visible {
+    outline: 2px solid rgb(var(--accent));
+    outline-offset: 2px;
+  }
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border border-line bg-surface-2 px-1
+           font-mono text-[10px] text-fg-mute;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

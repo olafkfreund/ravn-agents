@@ -24,6 +24,8 @@ pub struct Config {
     pub journald_enable: bool,
     /// Minimum syslog priority the journald tap emits (0=emerg … 7=debug).
     pub journald_min_priority: u8,
+    /// Whether the auth/SSH/audit classifier (#12) is enabled.
+    pub auth_enable: bool,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -51,12 +53,19 @@ struct FileLog {
 struct FileDetection {
     #[serde(default)]
     journald: FileJournald,
+    #[serde(default)]
+    auth: FileAuth,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct FileJournald {
     enable: Option<bool>,
     priority: Option<u8>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileAuth {
+    enable: Option<bool>,
 }
 
 impl Config {
@@ -94,7 +103,19 @@ impl Config {
             .unwrap_or(4) // warning and above
             .min(7);
 
-        Ok(Self { server_url, agent_id, host, log, journald_enable, journald_min_priority })
+        let auth_enable = env_bool("RAVN_AUTH")
+            .or(file.detection.auth.enable)
+            .unwrap_or(true);
+
+        Ok(Self {
+            server_url,
+            agent_id,
+            host,
+            log,
+            journald_enable,
+            journald_min_priority,
+            auth_enable,
+        })
     }
 }
 

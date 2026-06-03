@@ -59,6 +59,7 @@ async fn run_detection(config: &Config, transport: &Transport) {
         agent_id: config.agent_id,
         host: config.host.clone(),
         min_priority: config.journald_min_priority,
+        auth_enable: config.auth_enable,
     };
     tokio::spawn(async move {
         if let Err(error) = tap.run(tx).await {

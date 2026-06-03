@@ -24,19 +24,29 @@ use uuid::Uuid;
 pub struct JournaldTap {
     pub agent_id: Uuid,
     pub host: String,
-    /// Include entries whose syslog PRIORITY is <= this (0=emerg … 7=debug).
+    /// Include generic entries whose syslog PRIORITY is <= this (0=emerg … 7=debug).
     pub min_priority: u8,
+    /// Also classify auth/SSH/audit events (#12), regardless of priority.
+    pub auth_enable: bool,
 }
 
 impl JournaldTap {
     /// Stream journal entries until the channel closes or journalctl exits.
     pub async fn run(&self, tx: Sender<Message>) -> anyhow::Result<()> {
+        // Auth events are often info/notice, so when auth detection is on we
+        // stream down to info and filter generic entries in-process.
+        let stream_priority = if self.auth_enable {
+            self.min_priority.max(6)
+        } else {
+            self.min_priority
+        };
+
         let mut child = Command::new("journalctl")
             .args([
                 "--follow",
                 "--lines=0", // no backlog — only entries from now on
                 "--output=json",
-                &format!("--priority={}", self.min_priority),
+                &format!("--priority={stream_priority}"),
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -53,7 +63,7 @@ impl JournaldTap {
             }
             match serde_json::from_str::<Map<String, Value>>(&line) {
                 Ok(record) => {
-                    if let Some(event) = self.record_to_event(&record) {
+                    if let Some(event) = self.classify(&record) {
                         if tx.send(Message::new(event)).await.is_err() {
                             break; // receiver gone — shutting down
                         }
@@ -65,6 +75,16 @@ impl JournaldTap {
 
         let _ = child.kill().await;
         Ok(())
+    }
+
+    /// Classify a record: auth/SSH/audit first (#12), else the generic mapping.
+    fn classify(&self, rec: &Map<String, Value>) -> Option<Event> {
+        if self.auth_enable {
+            if let Some(event) = super::auth::classify(rec, self.agent_id, &self.host) {
+                return Some(event);
+            }
+        }
+        self.record_to_event(rec)
     }
 
     /// Map a journalctl JSON record to an [`Event`]. Pure; unit-tested.
@@ -141,7 +161,7 @@ mod tests {
     use ravn_core::Source;
 
     fn tap() -> JournaldTap {
-        JournaldTap { agent_id: Uuid::now_v7(), host: "test".into(), min_priority: 4 }
+        JournaldTap { agent_id: Uuid::now_v7(), host: "test".into(), min_priority: 4, auth_enable: false }
     }
 
     fn record(pairs: &[(&str, &str)]) -> Map<String, Value> {

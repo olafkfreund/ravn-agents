@@ -39,6 +39,15 @@ export async function listCategories(): Promise<CategoryDimension[]> {
   return data ?? [];
 }
 
+/** Replace an agent's labels (the category model). */
+export async function setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
+  const { error } = await api.PUT("/api/agents/{id}/labels", {
+    params: { path: { id: agentId } },
+    body: labels,
+  });
+  if (error) throw new Error("Failed to save labels");
+}
+
 /** Fetch the topology view, optionally grouped by a label key. */
 export async function getTopology(groupBy?: string): Promise<Topology> {
   const { data, error } = await api.GET("/api/topology", {

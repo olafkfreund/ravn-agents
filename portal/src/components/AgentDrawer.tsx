@@ -1,6 +1,12 @@
-import { useEffect } from "react";
-import type { Agent, StoredEvent } from "../lib/api";
+import { useEffect, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { setLabels, type Agent, type StoredEvent } from "../lib/api";
 import { absoluteTime, relativeTime, severityVar, sourceLabel, statusMeta } from "../lib/format";
+
+interface Entry {
+  key: string;
+  value: string;
+}
 
 export function AgentDrawer({
   agent,
@@ -11,6 +17,13 @@ export function AgentDrawer({
   events: StoredEvent[];
   onClose: () => void;
 }) {
+  const qc = useQueryClient();
+  const [entries, setEntries] = useState<Entry[]>([]);
+
+  useEffect(() => {
+    setEntries(Object.entries(agent?.labels ?? {}).map(([key, value]) => ({ key, value })));
+  }, [agent]);
+
   useEffect(() => {
     if (!agent) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -18,10 +31,27 @@ export function AgentDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [agent, onClose]);
 
+  const save = useMutation({
+    mutationFn: (vars: { id: string; labels: Record<string, string> }) => setLabels(vars.id, vars.labels),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agents"] });
+      qc.invalidateQueries({ queryKey: ["categories"] });
+      qc.invalidateQueries({ queryKey: ["topology"] });
+    },
+  });
+
   if (!agent) return null;
   const s = statusMeta(agent.status);
   const recent = events.filter((e) => e.agent_id === agent.agent_id).slice(0, 15);
-  const labels = Object.entries(agent.labels ?? {});
+
+  const onSave = () => {
+    const labels: Record<string, string> = {};
+    for (const e of entries) {
+      const k = e.key.trim();
+      if (k) labels[k] = e.value.trim();
+    }
+    save.mutate({ id: agent.agent_id, labels });
+  };
 
   return (
     <div className="fixed inset-0 z-50">
@@ -63,19 +93,64 @@ export function AgentDrawer({
             </div>
           </dl>
 
+          {/* Editable labels (categories) */}
           <div>
-            <p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-fg-mute">Labels</p>
-            {labels.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {labels.map(([k, v]) => (
-                  <span key={k} className="rounded-full border border-line bg-surface-2 px-2 py-0.5 text-xs">
-                    <span className="text-fg-mute">{k}:</span> <span className="text-accent-2">{v}</span>
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-fg-mute">No labels. Add some to group this agent in topology.</p>
-            )}
+            <div className="mb-2 flex items-center justify-between">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-fg-mute">Labels / categories</p>
+              {save.isSuccess && !save.isPending && <span className="text-xs text-sev-notice">saved ✓</span>}
+              {save.isError && <span className="text-xs text-sev-error">save failed</span>}
+            </div>
+            <div className="space-y-2">
+              {entries.map((e, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    value={e.key}
+                    onChange={(ev) =>
+                      setEntries((p) => p.map((x, j) => (j === i ? { ...x, key: ev.target.value } : x)))
+                    }
+                    placeholder="key (e.g. env)"
+                    className="w-1/3 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
+                  />
+                  <span className="text-fg-mute">:</span>
+                  <input
+                    value={e.value}
+                    onChange={(ev) =>
+                      setEntries((p) => p.map((x, j) => (j === i ? { ...x, value: ev.target.value } : x)))
+                    }
+                    placeholder="value (e.g. prod)"
+                    className="flex-1 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setEntries((p) => p.filter((_, j) => j !== i))}
+                    aria-label="Remove label"
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-fg-mute hover:border-sev-error hover:text-sev-error"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setEntries((p) => [...p, { key: "", value: "" }])}
+                className="rounded-md border border-line px-2.5 py-1 text-xs text-fg-dim hover:border-accent hover:text-fg"
+              >
+                + Add label
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={save.isPending}
+                className="rounded-md border border-accent bg-accent/15 px-3 py-1 text-xs font-semibold text-accent hover:bg-accent/25 disabled:opacity-50"
+              >
+                {save.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-fg-mute">
+              Labels are the grouping dimensions used by the Topology view.
+            </p>
           </div>
 
           <div>

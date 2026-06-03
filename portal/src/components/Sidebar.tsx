@@ -10,7 +10,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/events", label: "Events", glyph: "◈" },
   { to: "/agents", label: "Agents", glyph: "❖" },
-  { to: "/topology", label: "Topology", glyph: "⬡", soon: true },
+  { to: "/topology", label: "Topology", glyph: "⬡" },
 ];
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {

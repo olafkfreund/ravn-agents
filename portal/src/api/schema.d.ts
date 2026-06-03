@@ -90,6 +90,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/topology": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The fleet shaped for the topology diagram. */
+        get: operations["topology"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -132,17 +149,27 @@ export interface components {
         Agent: {
             /** Format: uuid */
             agent_id: string;
+            /** Format: int64 */
+            events_published?: number | null;
             /** Format: date-time */
             first_seen: string;
             host: string;
+            inference_enabled?: boolean | null;
             /** @description User-defined key/value labels. */
             labels: {
                 [key: string]: string;
             };
+            /**
+             * Format: date-time
+             * @description Health from the latest heartbeat (#20), if any.
+             */
+            last_heartbeat?: string | null;
             /** Format: date-time */
             last_seen: string;
             /** @description `online` | `stale` | `offline`, derived from `last_seen`. */
             status: string;
+            /** Format: int64 */
+            uptime_secs?: number | null;
         };
         /** @description One grouping dimension (label key) and its values. */
         CategoryDimension: {
@@ -202,6 +229,27 @@ export interface components {
             severity: string;
             source: string;
             title: string;
+        };
+        /** @description The fleet shaped for the topology diagram. */
+        Topology: {
+            /** @description Available grouping dimensions (label keys). */
+            dimensions: string[];
+            /** @description The label key used for grouping, if any. */
+            group_by?: string | null;
+            groups: components["schemas"]["TopologyGroup"][];
+        };
+        TopologyGroup: {
+            /** @description Group label value (or "ungrouped"/"all"). */
+            key: string;
+            nodes: components["schemas"]["TopologyNode"][];
+        };
+        TopologyNode: {
+            /** Format: uuid */
+            agent_id: string;
+            host: string;
+            /** @description Worst severity among the agent's recent events (last 24h), if any. */
+            severity?: string | null;
+            status: string;
         };
     };
     responses: never;
@@ -363,6 +411,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StoredEvent"][];
+                };
+            };
+        };
+    };
+    topology: {
+        parameters: {
+            query?: {
+                /** @description Label key to group agents by (e.g. `env`). Omit for a single group. */
+                group_by?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Grouped fleet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Topology"];
                 };
             };
         };

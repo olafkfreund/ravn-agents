@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
+use ravn_core::Severity;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -48,6 +49,16 @@ pub struct Config {
     pub inference_model: String,
     /// Per-request inference timeout (seconds).
     pub inference_timeout_secs: u64,
+    /// Batch events into a periodic digest instead of per-event explanations
+    /// (#17). Requires `inference_enable`; when on, per-event enrichment is
+    /// skipped to bound CPU.
+    pub digest_enable: bool,
+    /// How often (seconds) to emit a digest.
+    pub digest_interval_secs: u64,
+    /// Cap on events summarized per digest, to bound the prompt.
+    pub digest_max_events: usize,
+    /// Minimum severity an event needs to enter the digest (scope).
+    pub digest_min_severity: Severity,
     /// How often (seconds) to publish a heartbeat (#20).
     pub heartbeat_interval_secs: u64,
     /// Path to the local SQLite offline buffer (#21).
@@ -111,6 +122,16 @@ struct FileInference {
     enable: Option<bool>,
     endpoint: Option<String>,
     model: Option<String>,
+    #[serde(default)]
+    digest: FileDigest,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileDigest {
+    enable: Option<bool>,
+    interval_secs: Option<u64>,
+    max_events: Option<usize>,
+    min_severity: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -226,6 +247,27 @@ impl Config {
             .unwrap_or(15)
             .max(1);
 
+        let digest_enable = env_bool("RAVN_DIGEST")
+            .or(file.inference.digest.enable)
+            .unwrap_or(false);
+
+        let digest_interval_secs = env_var("RAVN_DIGEST_INTERVAL_SECS")
+            .and_then(|v| v.parse().ok())
+            .or(file.inference.digest.interval_secs)
+            .unwrap_or(3600)
+            .max(1);
+
+        let digest_max_events = env_var("RAVN_DIGEST_MAX_EVENTS")
+            .and_then(|v| v.parse().ok())
+            .or(file.inference.digest.max_events)
+            .unwrap_or(100)
+            .max(1);
+
+        let digest_min_severity = env_var("RAVN_DIGEST_MIN_SEVERITY")
+            .or(file.inference.digest.min_severity)
+            .and_then(|s| severity_from_str(&s))
+            .unwrap_or(Severity::Info);
+
         Ok(Self {
             server_url,
             agent_id,
@@ -244,6 +286,10 @@ impl Config {
             inference_endpoint,
             inference_model,
             inference_timeout_secs,
+            digest_enable,
+            digest_interval_secs,
+            digest_max_events,
+            digest_min_severity,
             heartbeat_interval_secs: env_var("RAVN_HEARTBEAT_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15)
@@ -303,6 +349,18 @@ fn read_file_config(path: &str) -> anyhow::Result<FileConfig> {
 /// `std::env::var`, treating empty as unset.
 fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// Parse a severity name (matching the wire `snake_case`).
+fn severity_from_str(s: &str) -> Option<Severity> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "info" => Some(Severity::Info),
+        "notice" => Some(Severity::Notice),
+        "warning" => Some(Severity::Warning),
+        "error" => Some(Severity::Error),
+        "critical" => Some(Severity::Critical),
+        _ => None,
+    }
 }
 
 /// Parse a boolean-ish env var (`1/true/yes/on` vs `0/false/no/off`).

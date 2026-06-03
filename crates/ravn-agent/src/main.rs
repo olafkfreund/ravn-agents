@@ -250,12 +250,37 @@ async fn run_detection(
     // the alarm, only its wording.
     let inference = config.inference_enable.then(|| {
         tracing::info!(endpoint = %config.inference_endpoint, "inference enrichment enabled");
-        inference::InferenceClient::new(
+        Arc::new(inference::InferenceClient::new(
             config.inference_endpoint.clone(),
             config.inference_model.clone(),
             std::time::Duration::from_secs(config.inference_timeout_secs),
-        )
+        ))
     });
+
+    // Digest mode (#17): instead of explaining each event inline, collect a
+    // window and summarize it with one batched inference call. Bounds CPU and
+    // hides per-event latency. Per-event enrichment is skipped while it's on.
+    let digest_buf: Option<Arc<Mutex<Vec<Event>>>> = match (&inference, config.digest_enable) {
+        (Some(client), true) => {
+            let buf = Arc::new(Mutex::new(Vec::<Event>::new()));
+            spawn_digest(
+                config.digest_interval_secs,
+                config.agent_id,
+                config.host.clone(),
+                transport.clone(),
+                buffer.clone(),
+                client.clone(),
+                buf.clone(),
+                health.clone(),
+            );
+            tracing::info!(
+                interval_secs = config.digest_interval_secs,
+                "digest mode enabled; per-event inference disabled"
+            );
+            Some(buf)
+        }
+        _ => None,
+    };
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -265,7 +290,16 @@ async fn run_detection(
             _ = &mut shutdown => break,
             maybe = rx.recv() => match maybe {
                 Some(mut message) => {
-                    if let Some(client) = &inference {
+                    if let Some(buf) = &digest_buf {
+                        // Collect for the next digest (scoped by severity); the
+                        // event itself still publishes immediately, bare.
+                        if message.event.severity >= config.digest_min_severity {
+                            let mut g = buf.lock().unwrap();
+                            if g.len() < config.digest_max_events {
+                                g.push(message.event.clone());
+                            }
+                        }
+                    } else if let Some(client) = &inference {
                         if message.explanation.is_none() {
                             message.explanation = client.explain(&message.event).await;
                         }
@@ -296,6 +330,89 @@ async fn run_detection(
     }
 
     tracing::info!(published = health.published.load(Ordering::Relaxed), "detection loop ended");
+}
+
+/// Periodically drain the accumulated window into a single batched-inference
+/// digest and publish it (#17).
+#[allow(clippy::too_many_arguments)]
+fn spawn_digest(
+    interval_secs: u64,
+    agent_id: Uuid,
+    host: String,
+    transport: Arc<Transport>,
+    buffer: Option<Arc<buffer::Buffer>>,
+    client: Arc<inference::InferenceClient>,
+    accumulator: Arc<Mutex<Vec<Event>>>,
+    health: Health,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+        tick.tick().await; // the first tick fires immediately; skip it
+        loop {
+            tick.tick().await;
+            let batch: Vec<Event> = {
+                let mut g = accumulator.lock().unwrap();
+                std::mem::take(&mut *g)
+            };
+            if batch.is_empty() {
+                continue;
+            }
+
+            let explanation = client.digest(&batch).await;
+            let message = build_digest_message(agent_id, &host, &batch, explanation);
+            match transport.publish(&message).await {
+                Ok(()) => {
+                    health.published.fetch_add(1, Ordering::Relaxed);
+                    tracing::info!(events = batch.len(), "published digest");
+                }
+                Err(error) => match &buffer {
+                    Some(b) => {
+                        let _ = b.enqueue(&message);
+                        tracing::warn!(%error, "digest publish failed; buffered");
+                    }
+                    None => tracing::warn!(%error, "digest publish failed (no buffer)"),
+                },
+            }
+        }
+    });
+}
+
+/// Build the digest message wrapping a window of events plus the batched
+/// explanation. Represented as a journald-style event (`ravn-digest`) so it
+/// rides the existing schema; its severity is the window's maximum.
+fn build_digest_message(
+    agent_id: Uuid,
+    host: &str,
+    events: &[Event],
+    explanation: Option<ravn_core::Explanation>,
+) -> Message {
+    let now = Utc::now();
+    let severity = events.iter().map(|e| e.severity).max().unwrap_or(Severity::Notice);
+
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for e in events {
+        *counts.entry(format!("{:?}", e.source())).or_default() += 1;
+    }
+    let summary = counts.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ");
+
+    let mut message = Message::new(Event {
+        id: Uuid::now_v7(),
+        occurred_at: now,
+        observed_at: now,
+        agent_id: AgentId(agent_id),
+        host: host.to_string(),
+        severity,
+        title: format!("Digest: {} events ({summary})", events.len()),
+        category_hints: vec!["digest".to_string()],
+        payload: Payload::Journald(JournaldPayload {
+            unit: Some("ravn-digest".to_string()),
+            priority: None,
+            message: format!("Periodic digest of {} events — {summary}", events.len()),
+            ..Default::default()
+        }),
+    });
+    message.explanation = explanation;
+    message
 }
 
 /// Build the one-off startup event.
@@ -354,4 +471,54 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravn_core::{Explanation, FailedUnitPayload, JournaldPayload, Source};
+
+    fn ev(severity: Severity, payload: Payload) -> Event {
+        let now = Utc::now();
+        Event {
+            id: Uuid::now_v7(),
+            occurred_at: now,
+            observed_at: now,
+            agent_id: AgentId(Uuid::now_v7()),
+            host: "host-9".into(),
+            severity,
+            title: "t".into(),
+            category_hints: vec![],
+            payload,
+        }
+    }
+
+    #[test]
+    fn digest_message_summarizes_window() {
+        let events = vec![
+            ev(Severity::Warning, Payload::Journald(JournaldPayload { message: "a".into(), ..Default::default() })),
+            ev(Severity::Error, Payload::FailedUnit(FailedUnitPayload { unit: "x".into(), result: "y".into(), ..Default::default() })),
+        ];
+        let expl = Some(Explanation {
+            text: "two issues; the failed unit matters most".into(),
+            suggested_check: Some("systemctl --failed".into()),
+            model: "m".into(),
+            generated_at: Utc::now(),
+        });
+        let msg = build_digest_message(Uuid::now_v7(), "host-9", &events, expl);
+
+        assert_eq!(msg.event.severity, Severity::Error, "digest takes the window's max severity");
+        assert!(msg.event.title.contains("2 events"));
+        assert!(msg.event.category_hints.contains(&"digest".to_string()));
+        // Rides the existing journald schema (no new payload variant).
+        assert_eq!(msg.event.source(), Source::Journald);
+        assert_eq!(msg.explanation.as_ref().unwrap().text, "two issues; the failed unit matters most");
+    }
+
+    #[test]
+    fn empty_window_defaults_to_notice() {
+        let msg = build_digest_message(Uuid::now_v7(), "h", &[], None);
+        assert_eq!(msg.event.severity, Severity::Notice);
+        assert!(msg.explanation.is_none());
+    }
 }

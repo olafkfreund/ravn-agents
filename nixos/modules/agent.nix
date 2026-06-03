@@ -259,6 +259,34 @@ in
           description = "JSONL file the bench hook appends `{ts,model,tokens_per_sec}` to.";
         };
       };
+
+      digest = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Periodic-digest mode (#17): batch a window of events into one
+            inference call ("what changed and what looks off") instead of
+            explaining each event. Bounds CPU and hides latency; per-event
+            enrichment is skipped while on. Requires `inference.enable`.
+          '';
+        };
+        intervalSecs = mkOption {
+          type = types.ints.positive;
+          default = 3600;
+          description = "How often to emit a digest, in seconds.";
+        };
+        maxEvents = mkOption {
+          type = types.ints.positive;
+          default = 100;
+          description = "Cap on events summarized per digest (bounds the prompt).";
+        };
+        minSeverity = mkOption {
+          type = types.enum [ "info" "notice" "warning" "error" "critical" ];
+          default = "info";
+          description = "Minimum severity for an event to enter the digest (scope).";
+        };
+      };
     };
 
     logLevel = mkOption {
@@ -301,6 +329,12 @@ in
         enable = mkDefault true;
         model = mkDefault cfg.inference.model.name;
         endpoint = mkDefault inferenceEndpoint;
+        digest = mkIf cfg.inference.digest.enable {
+          enable = mkDefault true;
+          interval_secs = mkDefault cfg.inference.digest.intervalSecs;
+          max_events = mkDefault cfg.inference.digest.maxEvents;
+          min_severity = mkDefault cfg.inference.digest.minSeverity;
+        };
       };
       enrollment = mkIf (cfg.enrollment.endpoint != null) {
         endpoint = mkDefault cfg.enrollment.endpoint;

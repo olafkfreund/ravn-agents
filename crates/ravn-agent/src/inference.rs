@@ -51,16 +51,31 @@ impl InferenceClient {
         Self { endpoint: endpoint.trim_end_matches('/').to_string(), model, http }
     }
 
-    /// Best-effort explanation for an event. Returns `None` on any failure.
+    /// Best-effort explanation for a single event (#16). `None` on any failure.
     pub async fn explain(&self, event: &Event) -> Option<Explanation> {
+        self.chat(SYSTEM_PROMPT, build_user_prompt(event), 320).await
+    }
+
+    /// Best-effort batched digest over a window of events (#17). A single
+    /// inference call covers the whole batch — bounding CPU and hiding
+    /// per-event latency. `None` if there's nothing to summarize or on failure.
+    pub async fn digest(&self, events: &[Event]) -> Option<Explanation> {
+        if events.is_empty() {
+            return None;
+        }
+        self.chat(DIGEST_SYSTEM_PROMPT, build_digest_prompt(events), 512).await
+    }
+
+    /// Shared completion path: POST a system+user prompt and parse the reply.
+    async fn chat(&self, system: &str, user: String, max_tokens: u32) -> Option<Explanation> {
         let body = serde_json::json!({
             "model": self.model,
             "messages": [
-                { "role": "system", "content": SYSTEM_PROMPT },
-                { "role": "user", "content": build_user_prompt(event) },
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
             ],
             "temperature": 0.2,
-            "max_tokens": 320,
+            "max_tokens": max_tokens,
             "response_format": { "type": "json_object" },
         });
 
@@ -93,6 +108,25 @@ impl InferenceClient {
         }
         Some(Explanation { text, suggested_check, model: self.model.clone(), generated_at: Utc::now() })
     }
+}
+
+/// System prompt for the batched periodic digest (#17).
+pub const DIGEST_SYSTEM_PROMPT: &str = "You are Ravn, a Linux operations assistant. \
+You are given a batch of system events observed over a time window. In 3-5 plain \
+sentences, summarize what changed and what looks off, calling out the most \
+important items; group similar events rather than listing each. Then suggest ONE \
+concrete command or check. Be factual; do not invent details not in the events. \
+Respond ONLY as a JSON object: {\"explanation\": string, \"suggested_check\": string}.";
+
+/// Build a compact batched prompt over a window of events (#17). One line per
+/// event keeps the prompt bounded even for large windows.
+pub fn build_digest_prompt(events: &[Event]) -> String {
+    use std::fmt::Write;
+    let mut s = format!("{} events in this window:\n", events.len());
+    for e in events {
+        let _ = writeln!(s, "- [{:?}] {:?} {}: {}", e.severity, e.source(), e.host, e.title);
+    }
+    s
 }
 
 /// Build the user prompt from an event, including a bounded slice of context.
@@ -231,6 +265,16 @@ mod tests {
         assert!(p.contains("nginx.service"));
         assert!(p.contains("exit-code"));
         assert!(p.contains("bind() to 0.0.0.0:80 failed"));
+    }
+
+    #[test]
+    fn digest_prompt_lists_events_compactly() {
+        let events = vec![event(), event()];
+        let p = build_digest_prompt(&events);
+        assert!(p.starts_with("2 events in this window:"));
+        assert_eq!(p.lines().filter(|l| l.starts_with("- ")).count(), 2);
+        assert!(p.contains("FailedUnit"));
+        assert!(p.contains("web-01"));
     }
 
     #[test]

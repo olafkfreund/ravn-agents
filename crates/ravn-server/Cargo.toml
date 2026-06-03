@@ -19,11 +19,13 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 axum = "0.8"
-tower-http = { version = "0.6", features = ["trace"] }
-utoipa = { version = "5", features = ["axum_extras"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
 async-nats = "0.38"
 futures-util = "0.3"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

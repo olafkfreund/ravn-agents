@@ -4,10 +4,38 @@
 //! no live database — important for the hermetic Nix build.
 
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use ravn_core::Message;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+/// A persisted event as returned by the read API.
+///
+/// Normalized columns are surfaced directly; `payload` and `explanation` are
+/// the raw JSON forms of the `ravn-core` types.
+#[derive(Debug, Clone, Serialize, ToSchema, FromRow)]
+pub struct StoredEvent {
+    pub id: Uuid,
+    pub occurred_at: DateTime<Utc>,
+    pub observed_at: DateTime<Utc>,
+    /// When the control plane ingested it.
+    pub received_at: DateTime<Utc>,
+    pub agent_id: Uuid,
+    pub host: String,
+    pub severity: String,
+    pub source: String,
+    pub title: String,
+    pub category_hints: Vec<String>,
+    /// Source-specific payload (`ravn_core::Payload`) as JSON.
+    #[schema(value_type = Object)]
+    pub payload: serde_json::Value,
+    /// LLM explanation (`ravn_core::Explanation`) as JSON, if present.
+    #[schema(value_type = Object)]
+    pub explanation: Option<serde_json::Value>,
+}
 
 /// Connect to PostgreSQL and verify the connection.
 pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
@@ -59,6 +87,25 @@ pub async fn insert_message(pool: &PgPool, msg: &Message) -> anyhow::Result<()> 
     .context("inserting event")?;
 
     Ok(())
+}
+
+/// Fetch the most recent events, newest first.
+pub async fn recent_events(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<StoredEvent>> {
+    let rows = sqlx::query_as::<_, StoredEvent>(
+        r#"
+        SELECT id, occurred_at, observed_at, received_at, agent_id, host,
+               severity, source, title, category_hints, payload, explanation
+        FROM events
+        ORDER BY occurred_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("querying recent events")?;
+
+    Ok(rows)
 }
 
 /// Render a fieldless serde enum (Severity, Source) as its wire string,

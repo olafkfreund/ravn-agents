@@ -1402,6 +1402,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "axum",
+ "chrono",
  "futures-util",
  "http-body-util",
  "ravn-core",
@@ -1414,6 +1415,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -2613,6 +2615,7 @@ dependencies = [
  "quote",
  "regex",
  "syn",
+ "uuid",
 ]
 
 [[package]]

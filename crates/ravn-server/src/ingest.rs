@@ -19,6 +19,11 @@ pub async fn run(state: AppState) {
         }
     };
 
+    // Ensure the SUBSCRIBE reaches the broker before we report ready, so we
+    // don't miss messages published immediately after startup (core NATS has
+    // no replay).
+    let _ = state.nats.flush().await;
+
     tracing::info!(subject = SUBJECT, "ingestion subscribed");
 
     while let Some(nats_msg) = sub.next().await {

@@ -5,14 +5,22 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 
 use crate::db;
+use crate::db::StoredEvent;
 use crate::state::AppState;
+
+/// Maximum number of events returned in one page.
+const MAX_LIMIT: i64 = 500;
+const DEFAULT_LIMIT: i64 = 50;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -67,16 +75,59 @@ async fn ready(State(state): State<AppState>) -> Json<Readiness> {
     Json(Readiness { ready: database && nats, checks })
 }
 
+/// Query parameters for listing events.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct ListEventsParams {
+    /// Maximum number of events to return (1–500, default 50).
+    pub limit: Option<i64>,
+}
+
+/// An error response.
+struct ApiError(anyhow::Error);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        tracing::error!(error = %self.0, "request failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(err: E) -> Self {
+        ApiError(err.into())
+    }
+}
+
+/// List recent events, newest first.
+#[utoipa::path(
+    get,
+    path = "/api/events",
+    tag = "events",
+    params(ListEventsParams),
+    responses((status = 200, description = "Recent events", body = [StoredEvent]))
+)]
+async fn list_events(
+    State(state): State<AppState>,
+    Query(params): Query<ListEventsParams>,
+) -> Result<Json<Vec<StoredEvent>>, ApiError> {
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let events = db::recent_events(&state.pool, limit).await?;
+    Ok(Json(events))
+}
+
 /// The OpenAPI specification for the control plane.
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, ready),
-    components(schemas(Health, Readiness)),
+    paths(health, ready, list_events),
+    components(schemas(Health, Readiness, StoredEvent)),
     info(
         title = "Ravn control plane",
         description = "Ingests agent events, persists them, and serves the portal."
     ),
-    tags((name = "system", description = "Liveness and readiness probes"))
+    tags(
+        (name = "system", description = "Liveness and readiness probes"),
+        (name = "events", description = "Persisted detection events")
+    )
 )]
 pub struct ApiDoc;
 
@@ -94,10 +145,15 @@ fn system_router() -> Router {
 
 /// Build the full application router for the given state.
 pub fn router(state: AppState) -> Router {
-    let stateful = Router::new().route("/ready", get(ready)).with_state(state);
+    let stateful = Router::new()
+        .route("/ready", get(ready))
+        .route("/api/events", get(list_events))
+        .with_state(state);
 
     system_router()
         .merge(stateful)
+        // Permissive CORS for the M0 dev portal (tighten before production).
+        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }
 

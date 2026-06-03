@@ -11,6 +11,10 @@ pub struct Config {
     pub bind: SocketAddr,
     /// Default tracing filter when `RUST_LOG` is unset. `RAVN_LOG`, default `info`.
     pub log: String,
+    /// PostgreSQL connection string. `DATABASE_URL`.
+    pub database_url: String,
+    /// NATS server URL. `NATS_URL`, default `nats://127.0.0.1:4222`.
+    pub nats_url: String,
 }
 
 impl Config {
@@ -23,6 +27,12 @@ impl Config {
 
         let log = std::env::var("RAVN_LOG").unwrap_or_else(|_| "info".to_string());
 
-        Ok(Self { bind, log })
+        let database_url = std::env::var("DATABASE_URL")
+            .context("DATABASE_URL must be set (PostgreSQL connection string)")?;
+
+        let nats_url =
+            std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+
+        Ok(Self { bind, log, database_url, nats_url })
     }
 }

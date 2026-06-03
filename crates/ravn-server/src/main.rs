@@ -6,11 +6,15 @@
 
 mod api;
 mod config;
+mod db;
+mod ingest;
+mod state;
 
 use anyhow::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::config::Config;
+use crate::state::AppState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,13 +23,29 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     init_tracing(&config);
 
+    // Database: connect and migrate before serving.
+    let pool = db::connect(&config.database_url).await?;
+    db::migrate(&pool).await?;
+    tracing::info!("database connected and migrated");
+
+    // NATS: connect for ingestion.
+    let nats = async_nats::connect(&config.nats_url)
+        .await
+        .with_context(|| format!("connecting to NATS at {}", config.nats_url))?;
+    tracing::info!(url = %config.nats_url, "NATS connected");
+
+    let app_state = AppState { pool, nats };
+
+    // Spawn the ingestion loop (NATS -> validate -> persist).
+    tokio::spawn(ingest::run(app_state.clone()));
+
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("binding {}", config.bind))?;
 
     tracing::info!(addr = %config.bind, version = VERSION, "ravn-server listening");
 
-    axum::serve(listener, api::app())
+    axum::serve(listener, api::router(app_state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;

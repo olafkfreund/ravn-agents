@@ -5,10 +5,14 @@
 
 use std::collections::BTreeMap;
 
+use axum::extract::State;
 use axum::{routing::get, Json, Router};
 use serde::Serialize;
 use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
+
+use crate::db;
+use crate::state::AppState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -49,11 +53,18 @@ async fn health() -> Json<Health> {
     tag = "system",
     responses((status = 200, description = "Service is ready", body = Readiness))
 )]
-async fn ready() -> Json<Readiness> {
-    // No external dependencies are wired yet (#24), so the service is ready by
-    // definition. As dependencies land they each add a `checks` entry and can
-    // flip `ready` to false.
-    Json(Readiness { ready: true, checks: BTreeMap::new() })
+async fn ready(State(state): State<AppState>) -> Json<Readiness> {
+    let database = db::ping(&state.pool).await;
+    let nats = matches!(
+        state.nats.connection_state(),
+        async_nats::connection::State::Connected
+    );
+
+    let mut checks = BTreeMap::new();
+    checks.insert("database".to_string(), database);
+    checks.insert("nats".to_string(), nats);
+
+    Json(Readiness { ready: database && nats, checks })
 }
 
 /// The OpenAPI specification for the control plane.
@@ -74,12 +85,19 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
-/// Build the application router.
-pub fn app() -> Router {
+/// Stateless system routes (liveness + the OpenAPI document).
+fn system_router() -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/ready", get(ready))
         .route("/openapi.json", get(openapi_json))
+}
+
+/// Build the full application router for the given state.
+pub fn router(state: AppState) -> Router {
+    let stateful = Router::new().route("/ready", get(ready)).with_state(state);
+
+    system_router()
+        .merge(stateful)
         .layer(TraceLayer::new_for_http())
 }
 
@@ -91,8 +109,11 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt; // for `oneshot`
 
+    // Exercises only the stateless system routes — no DB/NATS required, so
+    // these run in the hermetic Nix build. `/ready` is covered by an ignored
+    // live integration test (see tests below) that needs real services.
     async fn get_json(path: &str) -> (StatusCode, serde_json::Value) {
-        let resp = app()
+        let resp = system_router()
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -108,13 +129,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], VERSION);
-    }
-
-    #[tokio::test]
-    async fn ready_reports_ready() {
-        let (status, body) = get_json("/ready").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["ready"], true);
     }
 
     #[tokio::test]

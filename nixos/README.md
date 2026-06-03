@@ -33,6 +33,38 @@ The bootstrap token is delivered via systemd credentials, never the Nix store.
 > `llama-server` inference unit (#15) land in later issues. This module wires
 > the agent and sizes the inference slice; it does not yet start llama-server.
 
+## Local inference (#15)
+
+When `inference.enable` is true and a model is configured, the module runs
+`llama-server` as a sandboxed, **loopback-only** systemd unit (`ravn-llama`) in
+the resource-capped `ravn-inference` slice. The agent reaches it at
+`http://<host>:<port>` (default `127.0.0.1:18181`).
+
+Configure the model one of two ways:
+
+```nix
+services.ravn.agent.inference = {
+  # (a) a GGUF already on the host:
+  model.path = "/var/lib/ravn/models/qwen3-1.7b-q4_k_m.gguf";
+
+  # (b) or pin one to fetch into the store:
+  # model = {
+  #   name = "qwen3-1.7b-q4_k_m";
+  #   url = "https://…/Qwen3-1.7B-Q4_K_M.gguf";
+  #   sha256 = "sha256-…";  # nix-prefetch-url the file to get this
+  # };
+
+  cpuQuota = "400%";   # sizes the ravn-inference slice (#18)
+  memoryMax = "2G";
+  contextSize = 4096;
+};
+```
+
+**Swapping models:** change `model.path` (or `model.url`+`sha256` and
+`model.name`) and rebuild; the unit restarts with the new model. If neither
+`path` nor `url` is set, no llama-server unit is created and the agent simply
+emits events without explanations (safe failure — detection never waits on it).
+
 ## Trying it out
 
 `nixosConfigurations.demo-agent` is a minimal example machine (container

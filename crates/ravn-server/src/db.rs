@@ -213,6 +213,34 @@ pub async fn touch_agent(pool: &PgPool, agent_id: Uuid, host: &str) -> anyhow::R
     Ok(())
 }
 
+/// Record a successful enrollment (#19): upsert the agent and stamp its cert
+/// issuance/expiry. Idempotent — re-enrolling the same `agent_id` updates in
+/// place.
+pub async fn record_enrollment(
+    pool: &PgPool,
+    agent_id: Uuid,
+    host: &str,
+    cert_not_after: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agents (agent_id, host, last_seen, enrolled_at, cert_not_after)
+        VALUES ($1, $2, now(), now(), $3)
+        ON CONFLICT (agent_id) DO UPDATE SET
+            host = EXCLUDED.host,
+            enrolled_at = now(),
+            cert_not_after = EXCLUDED.cert_not_after
+        "#,
+    )
+    .bind(agent_id)
+    .bind(host)
+    .bind(cert_not_after)
+    .execute(pool)
+    .await
+    .context("recording enrollment")?;
+    Ok(())
+}
+
 /// All registered agents with status and labels.
 pub async fn list_agents(pool: &PgPool) -> anyhow::Result<Vec<Agent>> {
     let rows = sqlx::query_as::<_, AgentRow>(&format!(

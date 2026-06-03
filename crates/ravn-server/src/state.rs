@@ -5,6 +5,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
+use crate::ca::Ca;
 use crate::db::StoredEvent;
 use crate::metrics::Metrics;
 
@@ -22,4 +23,8 @@ pub struct AppState {
     pub viewer_token: Option<String>,
     /// Prometheus metrics (#40).
     pub metrics: Arc<Metrics>,
+    /// Internal CA for agent enrollment (#19). `None` disables `/enroll`.
+    pub ca: Option<Arc<Ca>>,
+    /// Bootstrap token agents present to enroll. Paired with `ca`.
+    pub enroll_token: Option<String>,
 }

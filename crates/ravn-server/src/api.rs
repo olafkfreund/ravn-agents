@@ -270,9 +270,60 @@ async fn metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// Agent enrollment (#19): exchange a bootstrap token + CSR for a signed
+/// client certificate. Authenticated by the bootstrap token itself (so it is
+/// exempt from bearer auth), compared in constant time. Idempotent.
+async fn enroll(
+    State(state): State<AppState>,
+    Json(req): Json<ravn_core::EnrollRequest>,
+) -> Response {
+    let (Some(ca), Some(expected)) = (state.ca.as_ref(), state.enroll_token.as_deref()) else {
+        return (StatusCode::NOT_FOUND, "enrollment is not enabled").into_response();
+    };
+
+    if !constant_time_eq(req.bootstrap_token.as_bytes(), expected.as_bytes()) {
+        return (StatusCode::UNAUTHORIZED, "invalid bootstrap token").into_response();
+    }
+
+    let (certificate_pem, not_after) = match ca.sign(&req.csr_pem, req.agent_id.0) {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::warn!(%error, agent_id = %req.agent_id.0, "enrollment CSR signing failed");
+            return (StatusCode::BAD_REQUEST, "could not sign CSR").into_response();
+        }
+    };
+
+    let not_after = chrono::DateTime::from_timestamp(not_after.unix_timestamp(), 0)
+        .unwrap_or_else(chrono::Utc::now);
+
+    if let Err(error) =
+        db::record_enrollment(&state.pool, req.agent_id.0, &req.host, not_after).await
+    {
+        tracing::error!(%error, "recording enrollment failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not record enrollment").into_response();
+    }
+
+    tracing::info!(agent_id = %req.agent_id.0, host = %req.host, %not_after, "agent enrolled");
+    Json(ravn_core::EnrollResponse {
+        agent_id: req.agent_id,
+        certificate_pem,
+        ca_certificate_pem: ca.ca_cert_pem().to_string(),
+        not_after,
+    })
+    .into_response()
+}
+
+/// Constant-time byte comparison, to keep token checks free of timing leaks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Endpoints reachable without auth even when tokens are configured.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ready" | "/metrics")
+    matches!(path, "/ready" | "/metrics" | "/enroll")
 }
 
 /// API access role (#26).
@@ -346,6 +397,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/topology", get(topology))
         .route("/ws/events", get(ws_events))
         .route("/metrics", get(metrics))
+        .route("/enroll", axum::routing::post(enroll))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

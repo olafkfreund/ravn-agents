@@ -9,6 +9,7 @@
 mod buffer;
 mod config;
 mod detection;
+mod enrollment;
 mod transport;
 
 use ravn_agent::inference;
@@ -57,6 +58,15 @@ async fn main() -> anyhow::Result<()> {
         version = VERSION,
         "ravnd starting"
     );
+
+    // Enrollment (#19): obtain/reuse the agent's mTLS identity before
+    // connecting. Best-effort — a failure must not stop detection (the mTLS
+    // handshake on the transport itself is wired in #26).
+    match enrollment::ensure_enrolled(&config).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "enrollment failed; continuing without an mTLS identity"),
+    }
 
     let transport = Arc::new(Transport::connect(&config.server_url, config.agent_id).await?);
     tracing::info!("transport connected");

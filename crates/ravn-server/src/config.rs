@@ -19,6 +19,22 @@ pub struct Config {
     pub admin_token: Option<String>,
     /// Bearer token granting read-only API access. `RAVN_VIEWER_TOKEN`.
     pub viewer_token: Option<String>,
+    /// Agent enrollment config (#19). `Some` only when the bootstrap token and
+    /// CA cert/key are all provided.
+    pub enroll: Option<EnrollConfig>,
+}
+
+/// Configuration for the bootstrap-token → mTLS enrollment endpoint (#19).
+#[derive(Debug, Clone)]
+pub struct EnrollConfig {
+    /// Shared bootstrap token agents present to enroll. `RAVN_ENROLL_TOKEN`.
+    pub bootstrap_token: String,
+    /// PEM CA certificate. Read from the path in `RAVN_CA_CERT`.
+    pub ca_cert_pem: String,
+    /// PEM CA private key. Read from the path in `RAVN_CA_KEY`.
+    pub ca_key_pem: String,
+    /// Validity of issued certificates, in days. `RAVN_CERT_TTL_DAYS`, default 90.
+    pub cert_ttl_days: i64,
 }
 
 impl Config {
@@ -41,6 +57,48 @@ impl Config {
         let admin_token = token("RAVN_ADMIN_TOKEN");
         let viewer_token = token("RAVN_VIEWER_TOKEN");
 
-        Ok(Self { bind, log, database_url, nats_url, admin_token, viewer_token })
+        let enroll = Self::enroll_from_env(&token)?;
+
+        Ok(Self { bind, log, database_url, nats_url, admin_token, viewer_token, enroll })
+    }
+
+    /// Assemble enrollment config from the environment. Enrollment is enabled
+    /// only when the bootstrap token *and* both CA file paths are set; if some
+    /// but not all are present, that's a misconfiguration and we error.
+    fn enroll_from_env(token: &impl Fn(&str) -> Option<String>) -> anyhow::Result<Option<EnrollConfig>> {
+        // The token may be given inline or, preferably, via a file (a systemd
+        // credential) so it never lands in the Nix store or process env.
+        let bootstrap = match token("RAVN_ENROLL_TOKEN") {
+            Some(t) => Some(t),
+            None => match token("RAVN_ENROLL_TOKEN_FILE") {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading RAVN_ENROLL_TOKEN_FILE at {path}"))?
+                        .trim()
+                        .to_string(),
+                ),
+                None => None,
+            },
+        };
+        let ca_cert_path = token("RAVN_CA_CERT");
+        let ca_key_path = token("RAVN_CA_KEY");
+
+        match (bootstrap, ca_cert_path, ca_key_path) {
+            (None, None, None) => Ok(None),
+            (Some(bootstrap_token), Some(cert_path), Some(key_path)) => {
+                let ca_cert_pem = std::fs::read_to_string(&cert_path)
+                    .with_context(|| format!("reading RAVN_CA_CERT at {cert_path}"))?;
+                let ca_key_pem = std::fs::read_to_string(&key_path)
+                    .with_context(|| format!("reading RAVN_CA_KEY at {key_path}"))?;
+                let cert_ttl_days = std::env::var("RAVN_CERT_TTL_DAYS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(90);
+                Ok(Some(EnrollConfig { bootstrap_token, ca_cert_pem, ca_key_pem, cert_ttl_days }))
+            }
+            _ => anyhow::bail!(
+                "incomplete enrollment config: set all of RAVN_ENROLL_TOKEN, RAVN_CA_CERT, RAVN_CA_KEY (or none)"
+            ),
+        }
     }
 }

@@ -113,6 +113,50 @@ unknown at evaluation time). The bench hook records
 `{ts, model, tokens_per_sec}` per tick, feeding the eval epic (#8) with on-host
 throughput trends — pair it with the `ravn-eval` harness for model comparison.
 
+## Agent enrollment (#19)
+
+Agents authenticate to the control plane with a per-agent **mTLS client
+certificate**, obtained at enrollment by exchanging a shared bootstrap token.
+The control plane runs an internal CA and signs each agent's CSR, binding the
+certificate's identity to the agent's `agent_id` (the CSR's claimed subject is
+ignored, so an agent can't mint a cert for another identity). Re-enrollment is
+idempotent — an agent that already holds credentials reuses them.
+
+Control plane — enable the `/enroll` endpoint:
+
+```nix
+services.ravn.controlPlane.enrollment = {
+  enable = true;
+  caCertFile = "/var/lib/ravn/ca.crt";     # public; signs agent certs
+  caKeyFile = "/run/secrets/ravn-ca.key";  # secret — delivered as a credential
+  bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
+  certTtlDays = 90;
+};
+```
+
+Agent — point it at the endpoint and give it the token:
+
+```nix
+services.ravn.agent = {
+  server.url = "nats://control.example.com:4222";
+  enrollment.endpoint = "https://control.example.com:8080";
+  enrollment.bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
+};
+```
+
+The CA key and bootstrap token are passed via systemd credentials and read at
+runtime — never copied into the world-readable Nix store. Issued credentials
+land in the agent's `StateDirectory` (`agent.key` `0600`, `agent.crt`,
+`ca.crt`). Generate a CA with, e.g.:
+
+```sh
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ca.key
+openssl req -x509 -new -key ca.key -days 3650 -subj '/CN=Ravn CA' -out ca.crt
+```
+
+> The transport's mTLS *handshake* enforcement (NATS/HTTP client-cert auth) is
+> tracked in #26; #19 establishes and persists the credential.
+
 ## Trying it out
 
 `nixosConfigurations.demo-agent` is a minimal example machine (container

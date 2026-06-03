@@ -20,6 +20,10 @@ pub struct Config {
     pub host: String,
     /// Default tracing filter when `RUST_LOG` is unset.
     pub log: String,
+    /// Whether the journald detection tap (#9) is enabled.
+    pub journald_enable: bool,
+    /// Minimum syslog priority the journald tap emits (0=emerg … 7=debug).
+    pub journald_min_priority: u8,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -29,6 +33,8 @@ struct FileConfig {
     server: FileServer,
     #[serde(default)]
     log: FileLog,
+    #[serde(default)]
+    detection: FileDetection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -39,6 +45,18 @@ struct FileServer {
 #[derive(Debug, Default, Deserialize)]
 struct FileLog {
     level: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileDetection {
+    #[serde(default)]
+    journald: FileJournald,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileJournald {
+    enable: Option<bool>,
+    priority: Option<u8>,
 }
 
 impl Config {
@@ -66,7 +84,17 @@ impl Config {
             .or(file.log.level)
             .unwrap_or_else(|| "info".to_string());
 
-        Ok(Self { server_url, agent_id, host, log })
+        let journald_enable = env_bool("RAVN_JOURNALD")
+            .or(file.detection.journald.enable)
+            .unwrap_or(true);
+
+        let journald_min_priority = env_var("RAVN_JOURNALD_PRIORITY")
+            .and_then(|v| v.parse().ok())
+            .or(file.detection.journald.priority)
+            .unwrap_or(4) // warning and above
+            .min(7);
+
+        Ok(Self { server_url, agent_id, host, log, journald_enable, journald_min_priority })
     }
 }
 
@@ -93,6 +121,15 @@ fn read_file_config(path: &str) -> anyhow::Result<FileConfig> {
 /// `std::env::var`, treating empty as unset.
 fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// Parse a boolean-ish env var (`1/true/yes/on` vs `0/false/no/off`).
+fn env_bool(key: &str) -> Option<bool> {
+    match env_var(key)?.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 //! agent → server → store thread is demonstrable end to end.
 
 mod config;
+mod detection;
 mod transport;
 
 use chrono::Utc;
@@ -35,15 +36,54 @@ async fn main() -> anyhow::Result<()> {
     let transport = Transport::connect(&config.server_url, config.agent_id).await?;
     tracing::info!("transport connected");
 
-    // Placeholder emission until detection taps land (#9). Modelled as a
-    // journald line so it fits the schema honestly.
-    let message = startup_message(&config);
-    transport.publish(&message).await?;
-    tracing::info!(event_id = %message.event.id, "published startup event");
+    // Announce the agent is online (a journald-style "ravnd started" line).
+    let startup = startup_message(&config);
+    transport.publish(&startup).await?;
+    tracing::info!(event_id = %startup.event.id, "published startup event");
 
-    // Detection + periodic emission arrive later; idle until shutdown.
-    shutdown_signal().await;
+    if config.journald_enable {
+        run_detection(&config, &transport).await;
+    } else {
+        tracing::info!("journald tap disabled; idling");
+        shutdown_signal().await;
+    }
+
     Ok(())
+}
+
+/// Run the detection taps, publishing each emitted event until shutdown.
+async fn run_detection(config: &Config, transport: &Transport) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(256);
+
+    let tap = detection::journald::JournaldTap {
+        agent_id: config.agent_id,
+        host: config.host.clone(),
+        min_priority: config.journald_min_priority,
+    };
+    tokio::spawn(async move {
+        if let Err(error) = tap.run(tx).await {
+            tracing::error!(%error, "journald tap exited");
+        }
+    });
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let mut published: u64 = 0;
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            maybe = rx.recv() => match maybe {
+                Some(message) => match transport.publish(&message).await {
+                    Ok(()) => published += 1,
+                    Err(error) => tracing::warn!(%error, "failed to publish event"),
+                },
+                None => break, // tap ended
+            },
+        }
+    }
+
+    tracing::info!(published, "detection loop ended");
 }
 
 /// Build the one-off startup event.

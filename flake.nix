@@ -115,6 +115,11 @@
           imports = [ ./nixos/modules/agent.nix ];
           nixpkgs.overlays = [ self.overlays.default ];
         };
+        # `services.ravn.controlPlane` (#36).
+        controlPlane = { ... }: {
+          imports = [ ./nixos/modules/control-plane.nix ];
+          nixpkgs.overlays = [ self.overlays.default ];
+        };
         default = self.nixosModules.agent;
       };
 
@@ -135,6 +140,24 @@
               enrollment.bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
               detection.configDrift.paths = [ "/etc/nixos" ];
               inference.model.path = "/var/lib/ravn/models/qwen3-1.7b-q4_k_m.gguf";
+            };
+          })
+        ];
+      };
+
+      # Canonical control-plane host: control plane + local NATS + Postgres.
+      nixosConfigurations.demo-control-plane = nixpkgs.lib.nixosSystem {
+        modules = [
+          self.nixosModules.controlPlane
+          ({ ... }: {
+            nixpkgs.hostPlatform = "x86_64-linux";
+            boot.isContainer = true;
+            system.stateVersion = "25.05";
+            networking.hostName = "demo-control-plane";
+
+            services.ravn.controlPlane = {
+              enable = true;
+              bind = "0.0.0.0:8080";
             };
           })
         ];

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -193,6 +194,37 @@ async fn topology(
     Ok(Json(db::topology(&state.pool, params.group_by.as_deref()).await?))
 }
 
+/// Live event stream (#29). Upgrades to a WebSocket that emits each newly
+/// ingested event as JSON.
+async fn ws_events(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| stream_events(socket, state))
+}
+
+async fn stream_events(mut socket: WebSocket, state: AppState) {
+    let mut rx = state.events_tx.subscribe();
+    loop {
+        tokio::select! {
+            received = rx.recv() => match received {
+                Ok(event) => {
+                    let json = match serde_json::to_string(&event) {
+                        Ok(j) => j,
+                        Err(_) => continue,
+                    };
+                    if socket.send(WsMessage::Text(json.into())).await.is_err() {
+                        break; // client gone
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(_)) => {}      // ignore client messages (incl. pings handled by axum)
+                _ => break,            // closed or errored
+            },
+        }
+    }
+}
+
 /// The OpenAPI specification for the control plane.
 #[derive(OpenApi)]
 #[openapi(
@@ -233,6 +265,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{id}/labels", axum::routing::put(put_labels))
         .route("/api/categories", get(list_categories))
         .route("/api/topology", get(topology))
+        .route("/ws/events", get(ws_events))
         .with_state(state);
 
     system_router()

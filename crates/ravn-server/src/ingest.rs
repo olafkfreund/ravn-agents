@@ -33,10 +33,14 @@ pub async fn run(state: AppState) {
             Ok(message) => {
                 if let Err(error) = db::insert_message(&state.pool, &message).await {
                     tracing::error!(%error, event_id = %message.event.id, "failed to persist message");
-                } else if let Err(error) =
-                    db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
-                {
-                    tracing::warn!(%error, "failed to update agent registry");
+                } else {
+                    if let Err(error) =
+                        db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
+                    {
+                        tracing::warn!(%error, "failed to update agent registry");
+                    }
+                    // Fan out to live WebSocket subscribers (#29); ignored if none.
+                    let _ = state.events_tx.send(db::message_to_stored(&message));
                 }
             }
             Err(error) => {

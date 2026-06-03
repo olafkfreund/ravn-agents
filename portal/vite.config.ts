@@ -15,6 +15,7 @@ export default defineConfig({
       "/health": { target: apiTarget, changeOrigin: true },
       "/ready": { target: apiTarget, changeOrigin: true },
       "/openapi.json": { target: apiTarget, changeOrigin: true },
+      "/ws": { target: apiTarget, changeOrigin: true, ws: true },
     },
   },
 });

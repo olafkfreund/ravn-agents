@@ -17,8 +17,8 @@ pub use event::{AgentId, Event, Severity, Source};
 pub use heartbeat::Heartbeat;
 pub use message::{Explanation, Message};
 pub use payload::{
-    AuthPayload, ConfigDriftPayload, Extra, FailedUnitPayload, JournaldPayload, Payload,
-    UpdatePayload,
+    kube_severity_for_reason, AuthPayload, ConfigDriftPayload, Extra, FailedUnitPayload,
+    JournaldPayload, KubeNodePayload, KubeWorkloadPayload, Payload, UpdatePayload,
 };
 
 /// Crate version, surfaced so the agent and server can report a build identity.
@@ -112,5 +112,64 @@ mod tests {
     fn message_schema_builds() {
         let schema = message_schema();
         assert!(serde_json::to_value(&schema).unwrap().is_object());
+    }
+
+    #[test]
+    fn old_schema_message_still_deserializes() {
+        // A pre-K8s (#54) message must still parse after the new variants are
+        // added — adding tagged enum variants is backward compatible (D7).
+        let json = r#"{
+            "event": {
+                "id": "00000000-0000-7000-8000-000000000001",
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "agent_id": "00000000-0000-7000-8000-0000000000aa",
+                "host": "legacy-01",
+                "severity": "warning",
+                "title": "sshd restarted",
+                "payload": { "kind": "journald", "unit": "sshd.service", "message": "restarted" }
+            }
+        }"#;
+        let msg: Message = serde_json::from_str(json).expect("old-schema message must still parse");
+        assert_eq!(msg.event.source(), Source::Journald);
+        assert!(msg.explanation.is_none());
+    }
+
+    #[test]
+    fn kube_workload_payload_round_trips_with_extra() {
+        // The `kind` tag selects the variant; unmodelled fields land in `extra`.
+        // (`kind` the workload-object field is absent here, so it defaults.)
+        let json = r#"{
+            "kind": "kube_workload",
+            "namespace": "payments",
+            "name": "api-7d9",
+            "reason": "CrashLoopBackOff",
+            "message": "back-off restarting failed container",
+            "count": 7,
+            "restart_total": 21
+        }"#;
+        let payload: Payload = serde_json::from_str(json).unwrap();
+        match &payload {
+            Payload::KubeWorkload(p) => {
+                assert_eq!(p.namespace, "payments");
+                assert_eq!(p.reason, "CrashLoopBackOff");
+                assert_eq!(p.count, Some(7));
+                // The object kind is absent here, so it defaults.
+                assert!(p.object_kind.is_empty());
+                assert_eq!(p.extra.get("restart_total").and_then(|v| v.as_i64()), Some(21));
+            }
+            other => panic!("expected kube_workload, got {other:?}"),
+        }
+        assert_eq!(payload.source(), Source::KubeWorkload);
+    }
+
+    #[test]
+    fn kube_severity_mapping_is_deterministic() {
+        assert_eq!(kube_severity_for_reason("OOMKilled"), Severity::Critical);
+        assert_eq!(kube_severity_for_reason("CrashLoopBackOff"), Severity::Error);
+        assert_eq!(kube_severity_for_reason("FailedScheduling"), Severity::Warning);
+        assert_eq!(kube_severity_for_reason("Started"), Severity::Info);
+        // Unknown reasons are visible but not alarming.
+        assert_eq!(kube_severity_for_reason("SomethingNew"), Severity::Warning);
     }
 }

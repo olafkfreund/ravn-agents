@@ -42,6 +42,10 @@ pub enum Source {
     ConfigDrift,
     Auth,
     Update,
+    /// Kubernetes workload signal from the controller (#54).
+    KubeWorkload,
+    /// Kubernetes node-level signal from the DaemonSet agent (#54).
+    KubeNode,
 }
 
 /// A normalized detection event.

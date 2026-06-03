@@ -73,6 +73,15 @@ pub fn salient_tokens(event: &Event) -> Vec<String> {
                 tokens.push(to.clone());
             }
         }
+        Payload::KubeWorkload(p) => {
+            tokens.push(p.namespace.clone());
+            tokens.push(p.name.clone());
+            tokens.push(p.reason.clone());
+        }
+        Payload::KubeNode(p) => {
+            tokens.push(p.node.clone());
+            tokens.push(p.condition.clone());
+        }
     }
     tokens.retain(|t| !t.trim().is_empty());
     tokens

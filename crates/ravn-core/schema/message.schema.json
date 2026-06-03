@@ -305,6 +305,97 @@
             }
           },
           "additionalProperties": true
+        },
+        {
+          "description": "A Kubernetes workload signal (#54), sourced by the controller from the Events API and object status: `OOMKilled`, `CrashLoopBackOff`, `BackOff`, `FailedScheduling`, `FailedMount`, `Unhealthy`, `ImagePullBackOff`, evictions, and status transitions.",
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "namespace",
+            "reason"
+          ],
+          "properties": {
+            "container": {
+              "description": "Container the signal concerns, when narrower than the pod.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "count": {
+              "description": "How many times the underlying event has fired (K8s `count`).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "kube_workload"
+              ]
+            },
+            "message": {
+              "description": "Human-readable message from the event.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Name of the involved object.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace of the involved object.",
+              "type": "string"
+            },
+            "object_kind": {
+              "description": "Kind of the involved object, e.g. `Pod`, `Deployment`, `Job`. Named `object_kind` to avoid colliding with the `Payload` enum's `kind` tag.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Kubernetes event/condition reason, e.g. `OOMKilled`, `CrashLoopBackOff`.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "A Kubernetes node-level signal (#54), sourced by the DaemonSet node agent: node conditions, kubelet errors, disk/memory pressure, node-level OOM.",
+          "type": "object",
+          "required": [
+            "condition",
+            "kind",
+            "node"
+          ],
+          "properties": {
+            "condition": {
+              "description": "Node condition or reason, e.g. `MemoryPressure`, `DiskPressure`, `KubeletNotReady`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "kube_node"
+              ]
+            },
+            "message": {
+              "description": "Human-readable detail.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node": {
+              "description": "Node the signal concerns.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
         }
       ]
     },

@@ -1,0 +1,14 @@
+[package]
+name = "ravn-server"
+description = "The Ravn control plane: ingests agent events, persists them, and serves the portal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ravn-server"
+path = "src/main.rs"
+
+[dependencies]
+ravn-core.workspace = true

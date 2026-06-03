@@ -1,0 +1,323 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Message",
+  "description": "The transport/persistence envelope.\n\nThis is what crosses the agent → control-plane transport (#22), what the control plane persists (#24), and what the portal feed renders (#29). The `explanation` is absent until (and unless) inference enriches the event.",
+  "type": "object",
+  "required": [
+    "event"
+  ],
+  "properties": {
+    "event": {
+      "$ref": "#/definitions/Event"
+    },
+    "explanation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Explanation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "Event": {
+      "description": "A normalized detection event.\n\nDeterministic: produced by a tap, independent of any LLM (\"taps fire the alarm; the model only explains\"). Inference enrichment is attached downstream via [`crate::Message`], never here.",
+      "type": "object",
+      "required": [
+        "agent_id",
+        "host",
+        "id",
+        "observed_at",
+        "occurred_at",
+        "payload",
+        "severity",
+        "title"
+      ],
+      "properties": {
+        "agent_id": {
+          "description": "The agent that emitted this event.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "category_hints": {
+          "description": "Agent-proposed category tags; the server's category model (#25) groups the fleet on a chosen dimension drawn from these.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "host": {
+          "description": "Hostname of the machine the agent runs on.",
+          "type": "string"
+        },
+        "id": {
+          "description": "UUIDv7 — time-sortable, so it doubles as a coarse ordering key and suits Postgres time-series partitioning (#24).",
+          "type": "string",
+          "format": "uuid"
+        },
+        "observed_at": {
+          "description": "When the agent's tap observed it, in UTC. Equals `occurred_at` when the source carries no distinct event time.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "occurred_at": {
+          "description": "When the underlying thing happened, in UTC.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "payload": {
+          "description": "Source-specific structured data; also determines [`Event::source`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Payload"
+            }
+          ]
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        },
+        "title": {
+          "description": "Short, deterministic human summary (no LLM involvement).",
+          "type": "string"
+        }
+      }
+    },
+    "Explanation": {
+      "description": "LLM-produced enrichment for an event (epic #2).\n\nProbabilistic and advisory: never used to decide *whether* something is wrong — only to explain a already-flagged [`Event`] and suggest a check.",
+      "type": "object",
+      "required": [
+        "generated_at",
+        "model",
+        "text"
+      ],
+      "properties": {
+        "generated_at": {
+          "description": "When the explanation was generated, in UTC.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "model": {
+          "description": "Identifier of the model that produced this explanation, for provenance and eval (epic #8).",
+          "type": "string"
+        },
+        "suggested_check": {
+          "description": "A concrete command or check the operator can run, when the model offers one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "Concise (2–3 sentence) explanation of the event.",
+          "type": "string"
+        }
+      }
+    },
+    "Payload": {
+      "description": "Structured, source-specific event data, internally tagged by `kind`.",
+      "oneOf": [
+        {
+          "description": "A structured entry from the systemd journal (#9).",
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "journald"
+              ]
+            },
+            "message": {
+              "description": "`MESSAGE` field.",
+              "type": "string"
+            },
+            "priority": {
+              "description": "syslog priority (0–7), when present.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0.0
+            },
+            "unit": {
+              "description": "`_SYSTEMD_UNIT`, when present.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "A systemd unit that entered a failed state, via D-Bus (#10).",
+          "type": "object",
+          "required": [
+            "kind",
+            "result",
+            "unit"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "failed_unit"
+              ]
+            },
+            "recent_log": {
+              "description": "Recent journal lines for context.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "result": {
+              "description": "systemd result string, e.g. `exit-code`, `timeout`, `oom-kill`.",
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "A watched config path whose contents changed (#11).",
+          "type": "object",
+          "required": [
+            "kind",
+            "new_hash",
+            "path"
+          ],
+          "properties": {
+            "diff": {
+              "description": "Unified diff, when the file is text and small enough to include.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "config_drift"
+              ]
+            },
+            "new_hash": {
+              "description": "Content hash after the change.",
+              "type": "string"
+            },
+            "old_hash": {
+              "description": "Content hash before the change, if a baseline existed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "An authentication / SSH / audit event (#12).",
+          "type": "object",
+          "required": [
+            "action",
+            "kind",
+            "succeeded"
+          ],
+          "properties": {
+            "action": {
+              "description": "What happened, e.g. `ssh_login`, `ssh_failed`, `sudo`, `new_session`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "auth"
+              ]
+            },
+            "remote_addr": {
+              "description": "Remote address, when the event has one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "succeeded": {
+              "type": "boolean"
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "A system update / NixOS-generation change (#13).",
+          "type": "object",
+          "required": [
+            "kind",
+            "mechanism"
+          ],
+          "properties": {
+            "changes": {
+              "description": "Human-readable list of changes (e.g. closure diff lines).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "from": {
+              "description": "Prior version/generation identifier, when known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "update"
+              ]
+            },
+            "mechanism": {
+              "description": "Update mechanism, e.g. `nixos`, `apt`, `dnf`.",
+              "type": "string"
+            },
+            "to": {
+              "description": "New version/generation identifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "Severity": {
+      "description": "Severity of an event, ordered least-to-most urgent.\n\nThe ordering is meaningful (`Info < Critical`) so the control plane can filter/threshold, and it drives portal colour-coding (#29).",
+      "type": "string",
+      "enum": [
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical"
+      ]
+    }
+  }
+}

@@ -1,0 +1,34 @@
+---
+layout: default
+---
+<section class="hero">
+  <p class="hero__kicker">Local-LLM fleet monitoring</p>
+  <h1 class="hero__title">{{ site.title | escape }}</h1>
+  <p class="hero__tagline">{{ site.description | strip_newlines | escape }}</p>
+</section>
+
+<div class="page-content">
+  {{ content }}
+</div>
+
+{%- if site.posts.size > 0 -%}
+<section class="devlog">
+  <div class="devlog__head">
+    <h2>{{ page.list_title | default: "Devlog" }}</h2>
+    <a class="more-link" href="{{ '/blog/' | relative_url }}">All posts →</a>
+  </div>
+  <ul class="post-list">
+    {%- for post in site.posts limit: 5 -%}
+    <li class="post-item">
+      <time class="post-item__date" datetime="{{ post.date | date_to_xmlschema }}">
+        {{ post.date | date: "%b %-d, %Y" }}
+      </time>
+      <a class="post-item__link" href="{{ post.url | relative_url }}">{{ post.title | escape }}</a>
+      {%- if post.description -%}
+      <p class="post-item__desc">{{ post.description | escape }}</p>
+      {%- endif -%}
+    </li>
+    {%- endfor -%}
+  </ul>
+</section>
+{%- endif -%}

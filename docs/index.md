@@ -4,8 +4,6 @@ title: Ravn
 list_title: Devlog
 ---
 
-**Small local-LLM agents that watch your Linux servers and report back in plain language.**
-
 Ravn is a fleet of lightweight agents — one per host — that watch logs, services,
 network, access, config drift and updates. Detection is deterministic and fast; a
 small CPU-only language model runs the *last mile*, turning a flagged event into a

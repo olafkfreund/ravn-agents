@@ -41,7 +41,9 @@ async fn main() -> anyhow::Result<()> {
     transport.publish(&startup).await?;
     tracing::info!(event_id = %startup.event.id, "published startup event");
 
-    let any_tap = config.journald_enable || !config.config_drift_paths.is_empty();
+    let any_tap = config.journald_enable
+        || !config.config_drift_paths.is_empty()
+        || config.failed_units_enable;
     if any_tap {
         run_detection(&config, &transport).await;
     } else {
@@ -81,6 +83,21 @@ async fn run_detection(config: &Config, transport: &Transport) {
         tokio::spawn(async move {
             if let Err(error) = tap.run(tx).await {
                 tracing::error!(%error, "config-drift tap exited");
+            }
+        });
+    }
+
+    if config.failed_units_enable {
+        let tap = detection::failed_unit::FailedUnitTap {
+            agent_id: config.agent_id,
+            host: config.host.clone(),
+            user_bus: config.systemd_user_bus,
+            poll_interval: std::time::Duration::from_secs(5),
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = tap.run(tx).await {
+                tracing::error!(%error, "failed-unit tap exited");
             }
         });
     }

@@ -30,6 +30,10 @@ pub struct Config {
     pub auth_enable: bool,
     /// Paths watched for config drift (#11); empty disables the watcher.
     pub config_drift_paths: Vec<PathBuf>,
+    /// Whether the failed-unit D-Bus tap (#10) is enabled.
+    pub failed_units_enable: bool,
+    /// Watch the per-user systemd manager instead of the system one.
+    pub systemd_user_bus: bool,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -61,12 +65,19 @@ struct FileDetection {
     auth: FileAuth,
     #[serde(default)]
     config_drift: FileConfigDrift,
+    #[serde(default)]
+    failed_units: FileFailedUnits,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct FileConfigDrift {
     #[serde(default)]
     paths: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileFailedUnits {
+    enable: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,6 +141,12 @@ impl Config {
             None => file.detection.config_drift.paths.into_iter().map(PathBuf::from).collect(),
         };
 
+        let failed_units_enable = env_bool("RAVN_FAILED_UNITS")
+            .or(file.detection.failed_units.enable)
+            .unwrap_or(true);
+
+        let systemd_user_bus = env_bool("RAVN_SYSTEMD_USER_BUS").unwrap_or(false);
+
         Ok(Self {
             server_url,
             agent_id,
@@ -139,6 +156,8 @@ impl Config {
             journald_min_priority,
             auth_enable,
             config_drift_paths,
+            failed_units_enable,
+            systemd_user_bus,
         })
     }
 }

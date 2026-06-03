@@ -28,3 +28,4 @@ notify = "6"
 sha2 = "0.10"
 hex = "0.4"
 similar = "2"
+zbus = { version = "4", default-features = false, features = ["tokio"] }

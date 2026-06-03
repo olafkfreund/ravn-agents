@@ -33,6 +33,27 @@ The bootstrap token is delivered via systemd credentials, never the Nix store.
 > `llama-server` inference unit (#15) land in later issues. This module wires
 > the agent and sizes the inference slice; it does not yet start llama-server.
 
+## `services.ravn.controlPlane` (#36)
+
+Declarative control plane. By default it provisions a local PostgreSQL (`ravn`
+database, owned by the `ravn` role via socket peer auth) and a loopback NATS
+with JetStream, and runs `ravn-server` as a hardened systemd service bound to
+loopback.
+
+```nix
+{
+  imports = [ ravn.nixosModules.controlPlane ];
+
+  services.ravn.controlPlane = {
+    enable = true;
+    bind = "127.0.0.1:8080";        # front with a TLS reverse proxy for remote access
+    # database.createLocally = true; # or set database.url for an external DB
+    # nats.createLocally = true;     # or point nats.url at an external broker
+    # oidc = { issuer = "https://idp.example.com"; clientId = "ravn"; };  # #26
+  };
+}
+```
+
 ## Local inference (#15)
 
 When `inference.enable` is true and a model is configured, the module runs

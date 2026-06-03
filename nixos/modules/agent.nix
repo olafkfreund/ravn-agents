@@ -92,6 +92,17 @@ in
       '';
     };
 
+    enrollment.endpoint = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "https://control.example.com:8080";
+      description = ''
+        Base URL of the control plane's enrollment endpoint (#19). When set with
+        a bootstrap token, the agent exchanges the token for an mTLS client
+        certificate on first start and reuses it thereafter (idempotent).
+      '';
+    };
+
     detection = {
       journald.enable = mkOption {
         type = types.bool;
@@ -290,6 +301,9 @@ in
         enable = mkDefault true;
         model = mkDefault cfg.inference.model.name;
         endpoint = mkDefault inferenceEndpoint;
+      };
+      enrollment = mkIf (cfg.enrollment.endpoint != null) {
+        endpoint = mkDefault cfg.enrollment.endpoint;
       };
     };
 

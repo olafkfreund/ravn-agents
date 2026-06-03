@@ -5,6 +5,7 @@
 //! persistence (#24), the agent registry (#25), and auth (#26) hang off this.
 
 mod api;
+mod ca;
 mod config;
 mod db;
 mod ingest;
@@ -41,6 +42,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::warn!("API auth disabled — set RAVN_ADMIN_TOKEN / RAVN_VIEWER_TOKEN to enable");
     }
+
+    // Agent enrollment CA (#19): build from config when configured.
+    let (ca, enroll_token) = match &config.enroll {
+        Some(e) => {
+            let ca = ca::Ca::load(&e.ca_cert_pem, &e.ca_key_pem, e.cert_ttl_days)
+                .context("loading enrollment CA")?;
+            tracing::info!(ttl_days = e.cert_ttl_days, "agent enrollment enabled (/enroll)");
+            (Some(std::sync::Arc::new(ca)), Some(e.bootstrap_token.clone()))
+        }
+        None => {
+            tracing::info!("agent enrollment disabled — set RAVN_ENROLL_TOKEN/RAVN_CA_CERT/RAVN_CA_KEY");
+            (None, None)
+        }
+    };
+
     let app_state = AppState {
         pool,
         nats,
@@ -48,6 +64,8 @@ async fn main() -> anyhow::Result<()> {
         admin_token: config.admin_token.clone(),
         viewer_token: config.viewer_token.clone(),
         metrics: std::sync::Arc::new(metrics::Metrics::new()),
+        ca,
+        enroll_token,
     };
 
     // Spawn the ingestion loops (events + heartbeats).

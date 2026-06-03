@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 
 let
-  inherit (lib) mkEnableOption mkPackageOption mkOption mkIf types optional optionalAttrs;
+  inherit (lib) mkEnableOption mkPackageOption mkOption mkIf types optional optionals optionalAttrs;
 
   cfg = config.services.ravn.controlPlane;
 
@@ -72,6 +72,36 @@ in
         description = "OIDC client ID (#26).";
       };
     };
+
+    enrollment = {
+      enable = mkEnableOption "agent enrollment: sign agent CSRs into mTLS client certs (#19)";
+      caCertFile = mkOption {
+        type = types.path;
+        example = "/var/lib/ravn/ca.crt";
+        description = "PEM CA certificate used to sign agent certs (public; may be in the store).";
+      };
+      caKeyFile = mkOption {
+        type = types.path;
+        example = "/run/secrets/ravn-ca-key";
+        description = ''
+          PEM CA private key. Delivered to the service as a systemd credential —
+          never copied into the world-readable Nix store.
+        '';
+      };
+      bootstrapTokenFile = mkOption {
+        type = types.path;
+        example = "/run/secrets/ravn-bootstrap-token";
+        description = ''
+          File holding the shared bootstrap token agents present to enroll.
+          Delivered via a systemd credential.
+        '';
+      };
+      certTtlDays = mkOption {
+        type = types.ints.positive;
+        default = 90;
+        description = "Validity of issued agent certificates, in days.";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -129,12 +159,25 @@ in
         RAVN_OIDC_ISSUER = cfg.oidc.issuer;
       } // optionalAttrs (cfg.oidc.clientId != null) {
         RAVN_OIDC_CLIENT_ID = cfg.oidc.clientId;
+      } // optionalAttrs cfg.enrollment.enable {
+        # CA cert is public; the key + token arrive as systemd credentials, so
+        # we point at the runtime credentials dir (%d) — secrets never hit env.
+        RAVN_CA_CERT = toString cfg.enrollment.caCertFile;
+        RAVN_CA_KEY = "%d/ca-key";
+        RAVN_ENROLL_TOKEN_FILE = "%d/enroll-token";
+        RAVN_CERT_TTL_DAYS = toString cfg.enrollment.certTtlDays;
       };
 
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;
         Restart = "on-failure";
         RestartSec = 5;
+
+        # Secrets for enrollment (#19), delivered as credentials.
+        LoadCredential = optionals cfg.enrollment.enable [
+          "ca-key:${cfg.enrollment.caKeyFile}"
+          "enroll-token:${cfg.enrollment.bootstrapTokenFile}"
+        ];
 
         # Fixed user so PostgreSQL peer auth maps to the `ravn` role.
         User = "ravn";

@@ -54,6 +54,12 @@ pub struct Config {
     pub buffer_path: String,
     /// Max buffered messages before the oldest are pruned.
     pub buffer_max: usize,
+    /// Control-plane enrollment endpoint base URL (#19); `None` skips enrollment.
+    pub enroll_endpoint: Option<String>,
+    /// Bootstrap token for first-time enrollment, read from a credential file.
+    pub bootstrap_token: Option<String>,
+    /// Directory holding the agent's mTLS credentials (key/cert/ca).
+    pub cred_dir: PathBuf,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -67,6 +73,13 @@ struct FileConfig {
     detection: FileDetection,
     #[serde(default)]
     inference: FileInference,
+    #[serde(default)]
+    enrollment: FileEnrollment,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileEnrollment {
+    endpoint: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -245,8 +258,26 @@ impl Config {
             buffer_max: env_var("RAVN_BUFFER_MAX")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10_000),
+            enroll_endpoint: env_var("RAVN_ENROLL_ENDPOINT").or(file.enrollment.endpoint),
+            bootstrap_token: bootstrap_token(),
+            cred_dir: env_var("RAVN_CRED_DIR")
+                .or_else(|| env_var("STATE_DIRECTORY").map(|d| format!("{d}/credentials")))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("ravn-credentials")),
         })
     }
+}
+
+/// Resolve the bootstrap token: `RAVN_BOOTSTRAP_TOKEN`, else the systemd
+/// credential file `$CREDENTIALS_DIRECTORY/bootstrap-token` (#19). The token is
+/// never placed in the world-readable Nix store.
+fn bootstrap_token() -> Option<String> {
+    if let Some(tok) = env_var("RAVN_BOOTSTRAP_TOKEN") {
+        return Some(tok);
+    }
+    let dir = env_var("CREDENTIALS_DIRECTORY")?;
+    let path = PathBuf::from(dir).join("bootstrap-token");
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Read `--config <path>` (or `--config=<path>`) from an argument iterator.

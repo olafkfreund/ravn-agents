@@ -16,7 +16,7 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::db;
-use crate::db::{Agent, CategoryDimension, StoredEvent};
+use crate::db::{Agent, CategoryDimension, StoredEvent, Topology};
 use crate::state::AppState;
 
 /// Maximum number of events returned in one page.
@@ -175,11 +175,30 @@ async fn list_categories(State(state): State<AppState>) -> Result<Json<Vec<Categ
     Ok(Json(db::list_categories(&state.pool).await?))
 }
 
+/// Query parameters for the topology view.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct TopologyParams {
+    /// Label key to group agents by (e.g. `env`). Omit for a single group.
+    pub group_by: Option<String>,
+}
+
+/// The fleet shaped for the topology diagram.
+#[utoipa::path(get, path = "/api/topology", tag = "agents",
+    params(TopologyParams),
+    responses((status = 200, description = "Grouped fleet", body = Topology)))]
+async fn topology(
+    State(state): State<AppState>,
+    Query(params): Query<TopologyParams>,
+) -> Result<Json<Topology>, ApiError> {
+    Ok(Json(db::topology(&state.pool, params.group_by.as_deref()).await?))
+}
+
 /// The OpenAPI specification for the control plane.
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, ready, list_events, list_agents, get_agent, put_labels, delete_agent, list_categories),
-    components(schemas(Health, Readiness, StoredEvent, Agent, CategoryDimension, crate::db::CategoryValue)),
+    paths(health, ready, list_events, list_agents, get_agent, put_labels, delete_agent, list_categories, topology),
+    components(schemas(Health, Readiness, StoredEvent, Agent, CategoryDimension, crate::db::CategoryValue,
+        Topology, crate::db::TopologyGroup, crate::db::TopologyNode)),
     info(
         title = "Ravn control plane",
         description = "Ingests agent events, persists them, and serves the portal."
@@ -213,6 +232,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{id}", get(get_agent).delete(delete_agent))
         .route("/api/agents/{id}/labels", axum::routing::put(put_labels))
         .route("/api/categories", get(list_categories))
+        .route("/api/topology", get(topology))
         .with_state(state);
 
     system_router()

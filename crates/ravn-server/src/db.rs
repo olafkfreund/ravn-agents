@@ -354,9 +354,107 @@ pub async fn list_categories(pool: &PgPool) -> anyhow::Result<Vec<CategoryDimens
     Ok(dims)
 }
 
+/// The fleet shaped for the topology diagram.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct Topology {
+    /// The label key used for grouping, if any.
+    pub group_by: Option<String>,
+    /// Available grouping dimensions (label keys).
+    pub dimensions: Vec<String>,
+    pub groups: Vec<TopologyGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TopologyGroup {
+    /// Group label value (or "ungrouped"/"all").
+    pub key: String,
+    pub nodes: Vec<TopologyNode>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TopologyNode {
+    pub agent_id: Uuid,
+    pub host: String,
+    pub status: String,
+    /// Worst severity among the agent's recent events (last 24h), if any.
+    pub severity: Option<String>,
+}
+
+fn severity_from_rank(rank: i32) -> &'static str {
+    match rank {
+        5 => "critical",
+        4 => "error",
+        3 => "warning",
+        2 => "notice",
+        _ => "info",
+    }
+}
+
+/// Build the topology view, grouping agents by the given label key.
+pub async fn topology(pool: &PgPool, group_by: Option<&str>) -> anyhow::Result<Topology> {
+    let agents = list_agents(pool).await?;
+
+    // Worst recent severity per agent (last 24h).
+    let sev_rows = sqlx::query_as::<_, (Uuid, i32)>(
+        r#"
+        SELECT agent_id, max(CASE severity
+            WHEN 'critical' THEN 5 WHEN 'error' THEN 4 WHEN 'warning' THEN 3
+            WHEN 'notice' THEN 2 ELSE 1 END)::int
+        FROM events
+        WHERE occurred_at > now() - interval '24 hours'
+        GROUP BY agent_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("computing worst severity")?;
+    let worst: BTreeMap<Uuid, String> = sev_rows
+        .into_iter()
+        .map(|(id, rank)| (id, severity_from_rank(rank).to_string()))
+        .collect();
+
+    let dimensions: Vec<String> = {
+        let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for a in &agents {
+            keys.extend(a.labels.keys().cloned());
+        }
+        keys.into_iter().collect()
+    };
+
+    let mut grouped: BTreeMap<String, Vec<TopologyNode>> = BTreeMap::new();
+    for a in &agents {
+        let group_key = match group_by {
+            Some(k) => a.labels.get(k).cloned().unwrap_or_else(|| "ungrouped".to_string()),
+            None => "all".to_string(),
+        };
+        grouped.entry(group_key).or_default().push(TopologyNode {
+            agent_id: a.agent_id,
+            host: a.host.clone(),
+            status: a.status.clone(),
+            severity: worst.get(&a.agent_id).cloned(),
+        });
+    }
+
+    Ok(Topology {
+        group_by: group_by.map(str::to_string),
+        dimensions,
+        groups: grouped
+            .into_iter()
+            .map(|(key, nodes)| TopologyGroup { key, nodes })
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod agent_tests {
     use super::*;
+
+    #[test]
+    fn severity_rank_maps_back() {
+        assert_eq!(severity_from_rank(5), "critical");
+        assert_eq!(severity_from_rank(3), "warning");
+        assert_eq!(severity_from_rank(1), "info");
+    }
 
     #[test]
     fn status_from_last_seen_age() {

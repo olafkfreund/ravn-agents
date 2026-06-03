@@ -5,4 +5,5 @@
 
 pub mod auth;
 pub mod config_drift;
+pub mod failed_unit;
 pub mod journald;

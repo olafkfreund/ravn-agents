@@ -1,0 +1,24 @@
+[package]
+name = "ravn-eval"
+description = "Model eval / benchmark harness: scores candidate models on the fixture set (#38)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ravn-eval"
+path = "src/main.rs"
+
+[dependencies]
+ravn-core.workspace = true
+ravn-agent.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+chrono = "0.4"
+uuid = { version = "1", features = ["v7"] }

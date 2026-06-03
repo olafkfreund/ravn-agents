@@ -1987,6 +1987,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ravn-eval"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ravn-agent",
+ "ravn-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ravn-server"
 version = "0.0.0"
 dependencies = [

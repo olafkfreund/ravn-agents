@@ -2,13 +2,13 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { severityVar, statusMeta } from "../../lib/format";
 
 export function AgentNode({ data }: NodeProps) {
-  const d = data as { host: string; status: string; severity: string | null };
+  const d = data as { host: string; status: string; severity: string | null; dimmed?: boolean };
   const sm = statusMeta(d.status);
   const border = d.severity ? severityVar(d.severity) : "rgb(var(--line))";
   return (
     <div
-      className="rounded-lg border border-line bg-surface px-3 py-2 shadow-card"
-      style={{ borderLeft: `3px solid ${border}`, width: 150 }}
+      className="rounded-lg border border-line bg-surface px-3 py-2 shadow-card transition-opacity"
+      style={{ borderLeft: `3px solid ${border}`, width: 150, opacity: d.dimmed ? 0.25 : 1 }}
     >
       <div className="flex items-center gap-1.5">
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: sm.dot }} />

@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("connecting to NATS at {}", config.nats_url))?;
     tracing::info!(url = %config.nats_url, "NATS connected");
 
-    let app_state = AppState { pool, nats };
+    let (events_tx, _) = tokio::sync::broadcast::channel(256);
+    let app_state = AppState { pool, nats, events_tx };
 
     // Spawn the ingestion loops (events + heartbeats).
     tokio::spawn(ingest::run(app_state.clone()));

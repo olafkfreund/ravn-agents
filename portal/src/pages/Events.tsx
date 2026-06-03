@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listEvents, type StoredEvent } from "../lib/api";
 import { type SeverityKey } from "../lib/format";
+import { useEventStream } from "../lib/useEventStream";
 import { StatStrip } from "../components/StatStrip";
 import { Filters } from "../components/Filters";
 import { EventsTable } from "../components/EventsTable";
@@ -11,7 +12,10 @@ export function Events() {
   const [search, setSearch] = useState("");
   const [active, setActive] = useState<Set<SeverityKey>>(new Set());
   const [selected, setSelected] = useState<StoredEvent | null>(null);
+  const [paused, setPaused] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const live = useEventStream(!paused);
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ["events"],
@@ -40,7 +44,13 @@ export function Events() {
       return next;
     });
 
-  const events = data ?? [];
+  // Merge the live WebSocket stream with the polled query, newest-first, deduped.
+  const events = useMemo(() => {
+    const byId = new Map<string, StoredEvent>();
+    for (const e of [...live, ...(data ?? [])]) byId.set(e.id, e);
+    return [...byId.values()].sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
+  }, [live, data]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return events.filter((e) => {
@@ -52,11 +62,24 @@ export function Events() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="font-display text-2xl font-bold tracking-tight">Fleet overview</h2>
-        <p className="text-sm text-fg-mute">
-          Deterministic detection across your servers — newest first, auto-refreshing.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="font-display text-2xl font-bold tracking-tight">Fleet overview</h2>
+          <p className="text-sm text-fg-mute">
+            Deterministic detection across your servers — newest first, streaming live.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setPaused((p) => !p)}
+          className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors ${
+            paused ? "border-line text-fg-dim hover:border-accent" : "border-sev-notice/40 bg-sev-notice/10 text-sev-notice"
+          }`}
+          title={paused ? "Resume live stream" : "Pause live stream"}
+        >
+          <span className={`h-2 w-2 rounded-full ${paused ? "bg-fg-mute" : "bg-sev-notice animate-pulse-ring"}`} />
+          {paused ? "Paused" : "Live"}
+        </button>
       </div>
 
       <StatStrip events={filtered} />

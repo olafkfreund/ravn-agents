@@ -35,7 +35,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(url = %config.nats_url, "NATS connected");
 
     let (events_tx, _) = tokio::sync::broadcast::channel(256);
-    let app_state = AppState { pool, nats, events_tx };
+    if config.admin_token.is_some() || config.viewer_token.is_some() {
+        tracing::info!("API auth enabled (bearer token + RBAC)");
+    } else {
+        tracing::warn!("API auth disabled — set RAVN_ADMIN_TOKEN / RAVN_VIEWER_TOKEN to enable");
+    }
+    let app_state = AppState {
+        pool,
+        nats,
+        events_tx,
+        admin_token: config.admin_token.clone(),
+        viewer_token: config.viewer_token.clone(),
+    };
 
     // Spawn the ingestion loops (events + heartbeats).
     tokio::spawn(ingest::run(app_state.clone()));

@@ -113,6 +113,22 @@ unknown at evaluation time). The bench hook records
 `{ts, model, tokens_per_sec}` per tick, feeding the eval epic (#8) with on-host
 throughput trends — pair it with the `ravn-eval` harness for model comparison.
 
+### Digest mode (#17)
+
+Instead of explaining every event as it fires, batch a window of events into a
+single "what changed and what looks off" digest. One inference call per window
+bounds CPU and hides per-event latency; events still publish immediately (bare),
+and per-event enrichment is skipped while digest mode is on.
+
+```nix
+services.ravn.agent.inference.digest = {
+  enable = true;
+  intervalSecs = 3600;     # emit a digest hourly
+  maxEvents = 100;         # cap events summarized per digest
+  minSeverity = "notice";  # scope: ignore info-level noise
+};
+```
+
 ## Agent enrollment (#19)
 
 Agents authenticate to the control plane with a per-agent **mTLS client

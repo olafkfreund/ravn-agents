@@ -24,6 +24,8 @@ pub enum Payload {
     ConfigDrift(ConfigDriftPayload),
     Auth(AuthPayload),
     Update(UpdatePayload),
+    KubeWorkload(KubeWorkloadPayload),
+    KubeNode(KubeNodePayload),
 }
 
 impl Payload {
@@ -35,6 +37,8 @@ impl Payload {
             Payload::ConfigDrift(_) => Source::ConfigDrift,
             Payload::Auth(_) => Source::Auth,
             Payload::Update(_) => Source::Update,
+            Payload::KubeWorkload(_) => Source::KubeWorkload,
+            Payload::KubeNode(_) => Source::KubeNode,
         }
     }
 }
@@ -114,4 +118,66 @@ pub struct UpdatePayload {
     pub changes: Vec<String>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// A Kubernetes workload signal (#54), sourced by the controller from the
+/// Events API and object status: `OOMKilled`, `CrashLoopBackOff`, `BackOff`,
+/// `FailedScheduling`, `FailedMount`, `Unhealthy`, `ImagePullBackOff`,
+/// evictions, and status transitions.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct KubeWorkloadPayload {
+    /// Namespace of the involved object.
+    pub namespace: String,
+    /// Kind of the involved object, e.g. `Pod`, `Deployment`, `Job`. Named
+    /// `object_kind` to avoid colliding with the `Payload` enum's `kind` tag.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub object_kind: String,
+    /// Name of the involved object.
+    pub name: String,
+    /// Kubernetes event/condition reason, e.g. `OOMKilled`, `CrashLoopBackOff`.
+    pub reason: String,
+    /// Human-readable message from the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// How many times the underlying event has fired (K8s `count`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    /// Container the signal concerns, when narrower than the pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A Kubernetes node-level signal (#54), sourced by the DaemonSet node agent:
+/// node conditions, kubelet errors, disk/memory pressure, node-level OOM.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct KubeNodePayload {
+    /// Node the signal concerns.
+    pub node: String,
+    /// Node condition or reason, e.g. `MemoryPressure`, `DiskPressure`, `KubeletNotReady`.
+    pub condition: String,
+    /// Human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Deterministic severity for a Kubernetes event/condition reason (#54).
+///
+/// Mirrors the design's mapping so the controller and node agent (#55/#56)
+/// classify consistently: hard failures escalate, transient/scheduling issues
+/// warn, and status transitions are informational. Unknown reasons default to
+/// [`Severity::Warning`] — visible but not alarming.
+pub fn kube_severity_for_reason(reason: &str) -> crate::event::Severity {
+    use crate::event::Severity::*;
+    match reason {
+        "OOMKilled" | "Evicted" | "NodeNotReady" | "SystemOOM" => Critical,
+        "CrashLoopBackOff" | "BackOff" | "FailedMount" | "FailedCreatePodSandBox" => Error,
+        "Unhealthy" | "MemoryPressure" | "DiskPressure" | "PIDPressure" => Error,
+        "FailedScheduling" | "ImagePullBackOff" | "ErrImagePull" | "ProbeWarning" => Warning,
+        "Created" | "Started" | "Pulled" | "Scheduled" | "SuccessfulCreate" => Info,
+        _ => Warning,
+    }
 }

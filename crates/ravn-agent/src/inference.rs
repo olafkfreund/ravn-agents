@@ -183,6 +183,25 @@ pub fn build_user_prompt(event: &Event) -> String {
                 }
             }
         }
+        Payload::KubeWorkload(p) => {
+            let obj = if p.object_kind.is_empty() { String::new() } else { format!("{}/", p.object_kind) };
+            s.push_str(&format!("K8s workload: {}/{obj}{} reason={}\n", p.namespace, p.name, p.reason));
+            if let Some(container) = &p.container {
+                s.push_str(&format!("Container: {container}\n"));
+            }
+            if let Some(count) = p.count {
+                s.push_str(&format!("Count: {count}\n"));
+            }
+            if let Some(msg) = &p.message {
+                s.push_str(&format!("Message: {msg}\n"));
+            }
+        }
+        Payload::KubeNode(p) => {
+            s.push_str(&format!("K8s node: {} condition={}\n", p.node, p.condition));
+            if let Some(msg) = &p.message {
+                s.push_str(&format!("Message: {msg}\n"));
+            }
+        }
     }
     s
 }

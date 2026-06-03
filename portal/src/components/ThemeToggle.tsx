@@ -9,10 +9,11 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={`Switch to ${next} theme`}
       title={`Switch to ${next} theme`}
-      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-elev px-3 py-1 text-sm text-fg transition-colors hover:border-accent"
+      className="grid h-9 w-9 place-items-center rounded-lg border border-line text-fg-dim transition-colors hover:border-accent hover:text-fg"
     >
-      <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
-      <span>{next === "dark" ? "Dark" : "Light"}</span>
+      <span aria-hidden="true" className="text-sm">
+        {theme === "dark" ? "☀" : "☾"}
+      </span>
     </button>
   );
 }

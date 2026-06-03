@@ -47,6 +47,18 @@ export function sourceLabel(source: string): string {
   return SOURCE_LABELS[source] ?? source.replace(/_/g, " ");
 }
 
+/** Presentation for an agent liveness status. */
+export function statusMeta(status: string): { label: string; text: string; dot: string } {
+  switch (status) {
+    case "online":
+      return { label: "Online", text: "text-sev-notice", dot: "rgb(var(--sev-notice))" };
+    case "stale":
+      return { label: "Stale", text: "text-sev-warning", dot: "rgb(var(--sev-warning))" };
+    default:
+      return { label: "Offline", text: "text-fg-mute", dot: "rgb(var(--sev-critical))" };
+  }
+}
+
 /** Compact relative time, e.g. "3m ago", "2h ago", "just now". */
 export function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();

@@ -4,6 +4,75 @@
  */
 
 export interface paths {
+    "/api/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all registered agents with status and labels. */
+        get: operations["list_agents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch a single agent. */
+        get: operations["get_agent"];
+        put?: never;
+        post?: never;
+        /** Remove an agent and its labels. */
+        delete: operations["delete_agent"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Replace an agent's labels. */
+        put: operations["put_labels"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/categories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List grouping dimensions (label keys, values, and agent counts). */
+        get: operations["list_categories"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/events": {
         parameters: {
             query?: never;
@@ -59,6 +128,32 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description A registered agent with its derived liveness status and labels. */
+        Agent: {
+            /** Format: uuid */
+            agent_id: string;
+            /** Format: date-time */
+            first_seen: string;
+            host: string;
+            /** @description User-defined key/value labels. */
+            labels: {
+                [key: string]: string;
+            };
+            /** Format: date-time */
+            last_seen: string;
+            /** @description `online` | `stale` | `offline`, derived from `last_seen`. */
+            status: string;
+        };
+        /** @description One grouping dimension (label key) and its values. */
+        CategoryDimension: {
+            key: string;
+            values: components["schemas"]["CategoryValue"][];
+        };
+        CategoryValue: {
+            /** Format: int64 */
+            agent_count: number;
+            value: string;
+        };
         /** @description Liveness response. */
         Health: {
             /** @description Always `"ok"` when the service is live. */
@@ -117,6 +212,138 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_agents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Registered agents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Agent"][];
+                };
+            };
+        };
+    };
+    get_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Agent"];
+                };
+            };
+            /** @description Unknown agent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown agent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_labels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: string;
+                };
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Agent"];
+                };
+            };
+            /** @description Unknown agent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_categories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Grouping dimensions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CategoryDimension"][];
+                };
+            };
+        };
+    };
     list_events: {
         parameters: {
             query?: {

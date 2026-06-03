@@ -1,0 +1,17 @@
+{
+  "id": "019ed000-1000-7000-8000-000000000004",
+  "occurred_at": "2026-05-01T11:42:19Z",
+  "observed_at": "2026-05-01T11:42:19Z",
+  "agent_id": "019ed000-0000-7000-8000-0000000000aa",
+  "host": "web-01",
+  "severity": "warning",
+  "title": "failed ssh login: root",
+  "category_hints": ["auth", "ssh", "security"],
+  "payload": {
+    "kind": "auth",
+    "action": "ssh_failed",
+    "user": "root",
+    "remote_addr": "203.0.113.7",
+    "succeeded": false
+  }
+}

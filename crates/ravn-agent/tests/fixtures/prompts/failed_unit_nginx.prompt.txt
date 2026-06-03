@@ -1,0 +1,9 @@
+Severity: Error
+Source: FailedUnit
+Host: web-01
+Title: unit failed: nginx.service
+Failed unit: nginx.service (result: exit-code)
+Recent log:
+  nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)
+  nginx: [emerg] still could not bind()
+  systemd[1]: nginx.service: Failed with result 'exit-code'.

@@ -1,0 +1,4 @@
+{
+  "explanation": "Repeated failed SSH logins for root from 203.0.113.7 suggest a brute-force attempt against the server.",
+  "suggested_check": "sudo grep 'Failed password' /var/log/auth.log | tail -n 50"
+}

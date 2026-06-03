@@ -245,4 +245,88 @@ mod tests {
         assert_eq!(text, "just a sentence, no json");
         assert!(check.is_none());
     }
+
+    // ---- Golden prompt-regression fixtures (#39) ----------------------------
+    //
+    // These scan `tests/fixtures/` so contributors can add cases by dropping in
+    // data files (see that directory's README). `RAVN_BLESS=1` regenerates the
+    // `*.prompt.txt` goldens from the current `build_user_prompt`.
+
+    use std::path::{Path, PathBuf};
+
+    fn fixtures_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    /// Sorted base names of files in `dir` whose name ends with `suffix`.
+    fn case_names(dir: &Path, suffix: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read fixtures dir {}: {e}", dir.display()))
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| name.strip_suffix(suffix).map(str::to_string))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn fixture_prompts_render_to_golden() {
+        let dir = fixtures_dir().join("prompts");
+        let bless = std::env::var_os("RAVN_BLESS").is_some();
+        let names = case_names(&dir, ".event.json");
+        assert!(!names.is_empty(), "no prompt fixtures found in {}", dir.display());
+
+        for name in names {
+            let event_json = std::fs::read_to_string(dir.join(format!("{name}.event.json")))
+                .unwrap_or_else(|e| panic!("read {name}.event.json: {e}"));
+            let event: Event = serde_json::from_str(&event_json)
+                .unwrap_or_else(|e| panic!("parse {name}.event.json as Event: {e}"));
+            let rendered = build_user_prompt(&event);
+
+            let golden_path = dir.join(format!("{name}.prompt.txt"));
+            if bless {
+                std::fs::write(&golden_path, &rendered)
+                    .unwrap_or_else(|e| panic!("bless {name}.prompt.txt: {e}"));
+                continue;
+            }
+            let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+                panic!("missing golden {name}.prompt.txt ({e}); run with RAVN_BLESS=1")
+            });
+            assert_eq!(
+                rendered, expected,
+                "prompt for fixture '{name}' drifted from golden; \
+                 if intended, re-bless with RAVN_BLESS=1"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_explanations_parse_as_expected() {
+        let dir = fixtures_dir().join("explanations");
+        let names = case_names(&dir, ".response.txt");
+        assert!(!names.is_empty(), "no explanation fixtures found in {}", dir.display());
+
+        for name in names {
+            let response = std::fs::read_to_string(dir.join(format!("{name}.response.txt")))
+                .unwrap_or_else(|e| panic!("read {name}.response.txt: {e}"));
+            let expected_json = std::fs::read_to_string(dir.join(format!("{name}.expected.json")))
+                .unwrap_or_else(|e| panic!("read {name}.expected.json: {e}"));
+            let expected: serde_json::Value = serde_json::from_str(&expected_json)
+                .unwrap_or_else(|e| panic!("parse {name}.expected.json: {e}"));
+
+            let (text, check) = parse_explanation(&response);
+            assert_eq!(
+                text,
+                expected["explanation"].as_str().unwrap_or_default(),
+                "explanation for fixture '{name}' did not match"
+            );
+            let expected_check = expected["suggested_check"].as_str();
+            assert_eq!(
+                check.as_deref(),
+                expected_check,
+                "suggested_check for fixture '{name}' did not match"
+            );
+        }
+    }
 }

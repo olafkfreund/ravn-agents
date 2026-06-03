@@ -1,0 +1,4 @@
+{
+  "explanation": "PermitRootLogin was changed from no to yes in sshd_config, which weakens the host's SSH posture by allowing direct root logins.",
+  "suggested_check": null
+}

@@ -1,0 +1,7 @@
+Severity: Warning
+Source: Auth
+Host: web-01
+Title: failed ssh login: root
+Action: ssh_failed (succeeded: false)
+User: root
+Remote: 203.0.113.7

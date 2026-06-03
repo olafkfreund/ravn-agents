@@ -33,19 +33,25 @@ pub async fn run(state: AppState) {
             Ok(message) => {
                 if let Err(error) = db::insert_message(&state.pool, &message).await {
                     tracing::error!(%error, event_id = %message.event.id, "failed to persist message");
+                    state.metrics.ingest_errors.inc();
                 } else {
                     if let Err(error) =
                         db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
                     {
                         tracing::warn!(%error, "failed to update agent registry");
                     }
+                    let severity = serde_json::to_value(message.event.severity)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    state.metrics.events_ingested.with_label_values(&[&severity]).inc();
                     // Fan out to live WebSocket subscribers (#29); ignored if none.
                     let _ = state.events_tx.send(db::message_to_stored(&message));
                 }
             }
             Err(error) => {
-                // A malformed payload is dropped, not retried — it will never
-                // parse. Counted via metrics later (#40).
+                // A malformed payload is dropped, not retried — it will never parse.
+                state.metrics.ingest_errors.inc();
                 tracing::warn!(%error, subject = %nats_msg.subject, "dropping malformed message");
             }
         }
@@ -69,6 +75,7 @@ pub async fn run_heartbeats(state: AppState) {
     while let Some(nats_msg) = sub.next().await {
         match serde_json::from_slice::<Heartbeat>(&nats_msg.payload) {
             Ok(hb) => {
+                state.metrics.heartbeats.inc();
                 if let Err(error) = db::record_heartbeat(&state.pool, &hb).await {
                     tracing::warn!(%error, "failed to record heartbeat");
                 }

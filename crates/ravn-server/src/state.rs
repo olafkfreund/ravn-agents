@@ -1,9 +1,12 @@
 //! Shared application state handed to HTTP handlers and the ingestion task.
 
+use std::sync::Arc;
+
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
 use crate::db::StoredEvent;
+use crate::metrics::Metrics;
 
 /// Cloneable handle to the control plane's runtime dependencies.
 #[derive(Clone)]
@@ -17,4 +20,6 @@ pub struct AppState {
     /// API auth tokens (#26). Auth is enforced only when at least one is set.
     pub admin_token: Option<String>,
     pub viewer_token: Option<String>,
+    /// Prometheus metrics (#40).
+    pub metrics: Arc<Metrics>,
 }

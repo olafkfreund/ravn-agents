@@ -38,6 +38,14 @@
     postgresql_17
     sqlx-cli
 
+    # Kubernetes dev cluster + tooling for the K8s epic (#53). k3d runs k3s
+    # inside Docker; kubectl/k9s/helm drive it. The cluster is created on an
+    # uncommon API port via `k3d-up` (see scripts below).
+    k3d
+    kubectl
+    k9s
+    kubernetes-helm
+
     # Nix authoring tooling per project standards.
     nixd
     statix
@@ -54,7 +62,7 @@
     enable = true;
     package = pkgs.postgresql_17;
     port = 54329;
-    initialDatabases = [ { name = "ravn"; } ];
+    initialDatabases = [{ name = "ravn"; }];
   };
 
   # NATS broker with JetStream, run as a managed process on a high/uncommon
@@ -64,7 +72,35 @@
   env = {
     RUST_LOG = "info";
     NATS_URL = "nats://127.0.0.1:14222";
+    # Project-local kubeconfig so the k3d cluster never clobbers the user's
+    # ~/.kube/config (they likely run other clusters).
+    KUBECONFIG = "${config.env.DEVENV_STATE}/kubeconfig";
   };
+
+  # k3d cluster lifecycle (#53). The cluster API binds an uncommon host port
+  # (16443) to avoid colliding with anything on the default 6443.
+  scripts.k3d-up.exec = ''
+    set -euo pipefail
+    cfg="$DEVENV_ROOT/k8s/k3d/cluster.yaml"
+    if k3d cluster list ravn-dev >/dev/null 2>&1; then
+      echo "cluster 'ravn-dev' already exists"
+    else
+      echo "creating k3d cluster 'ravn-dev' (API on 127.0.0.1:16443)…"
+      k3d cluster create --config "$cfg" \
+        --kubeconfig-update-default=false --kubeconfig-switch-context=false
+    fi
+    k3d kubeconfig write ravn-dev --output "$KUBECONFIG" >/dev/null
+    kubectl apply -f "$DEVENV_ROOT/k8s/test-workloads.yaml"
+    echo "KUBECONFIG=$KUBECONFIG"
+    kubectl get pods -n ravn-test -o wide || true
+  '';
+  scripts.k3d-down.exec = ''k3d cluster delete ravn-dev'';
+  scripts.k3d-status.exec = ''
+    set -euo pipefail
+    kubectl get nodes
+    echo
+    kubectl get pods -n ravn-test -o wide
+  '';
 
   enterShell = ''
     # devenv runs Postgres on a unix socket in $PGHOST; derive DATABASE_URL
@@ -73,5 +109,7 @@
     echo "Ravn dev shell — rustc $(rustc --version | cut -d' ' -f2), node $(node --version)"
     echo "  devenv up      → start Postgres (socket) + NATS (:14222)"
     echo "  cargo build    → build the workspace"
+    echo "  k3d-up         → create the k3d test cluster + 2 pods (API :16443)"
+    echo "  k3d-status     → nodes + test pods   |   k3d-down → delete cluster"
   '';
 }

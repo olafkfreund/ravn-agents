@@ -1,0 +1,56 @@
+# Two small test workloads in the `ravn-test` namespace (#53).
+#
+#  - healthy: a tiny pod that just sleeps (stays Running) — the baseline.
+#  - crasher: a pod that exits non-zero on a loop → CrashLoopBackOff, producing
+#    the KubeWorkload signals (BackOff / CrashLoopBackOff) the controller (#55)
+#    will detect and the schema (#54) models.
+#
+# Apply with `k3d-up` (which also creates the cluster), or:
+#   kubectl apply -f k8s/test-workloads.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ravn-test
+  labels:
+    app.kubernetes.io/part-of: ravn-test
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: healthy
+  namespace: ravn-test
+  labels:
+    app: ravn-healthy
+spec:
+  containers:
+    - name: sleeper
+      image: busybox:1.36
+      command: ["sh", "-c", "echo healthy; sleep 3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crasher
+  namespace: ravn-test
+  labels:
+    app: ravn-crasher
+spec:
+  restartPolicy: Always
+  containers:
+    - name: boom
+      image: busybox:1.36
+      command: ["sh", "-c", "echo starting; sleep 2; echo crashing; exit 1"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi

@@ -55,10 +55,28 @@
           doCheck = false;
           meta.mainProgram = "ravn-server";
         });
+
+        # Reproducible OCI images (#37). Load with `docker load < $(nix build .#ravn-server-image --print-out-paths)`.
+        ravn-server-image = pkgs.dockerTools.buildLayeredImage {
+          name = "ravn-server";
+          tag = "latest";
+          contents = [ ravn-server pkgs.cacert ];
+          config = {
+            Entrypoint = [ "${ravn-server}/bin/ravn-server" ];
+            ExposedPorts = { "8080/tcp" = { }; };
+          };
+        };
+
+        ravn-agent-image = pkgs.dockerTools.buildLayeredImage {
+          name = "ravn-agent";
+          tag = "latest";
+          contents = [ ravn-agent pkgs.cacert ];
+          config.Entrypoint = [ "${ravn-agent}/bin/ravnd" ];
+        };
       in
       {
         packages = {
-          inherit ravn-agent ravn-server;
+          inherit ravn-agent ravn-server ravn-agent-image ravn-server-image;
           default = ravn-server;
         };
 

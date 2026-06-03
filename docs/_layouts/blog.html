@@ -1,0 +1,29 @@
+---
+layout: default
+---
+<article class="page">
+  <h1 class="page__title">{{ page.title | escape }}</h1>
+  {%- if content != "" -%}
+  <div class="page-content blog__intro">
+    {{ content }}
+  </div>
+  {%- endif -%}
+
+  {%- if site.posts.size > 0 -%}
+  <ul class="post-list">
+    {%- for post in site.posts -%}
+    <li class="post-item">
+      <time class="post-item__date" datetime="{{ post.date | date_to_xmlschema }}">
+        {{ post.date | date: "%b %-d, %Y" }}
+      </time>
+      <a class="post-item__link" href="{{ post.url | relative_url }}">{{ post.title | escape }}</a>
+      {%- if post.description -%}
+      <p class="post-item__desc">{{ post.description | escape }}</p>
+      {%- endif -%}
+    </li>
+    {%- endfor -%}
+  </ul>
+  {%- else -%}
+  <p>No posts yet — check back soon.</p>
+  {%- endif -%}
+</article>

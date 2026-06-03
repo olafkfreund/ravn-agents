@@ -1,0 +1,196 @@
+/* Ravn — Gruvbox theme with runtime light/dark switching.
+   Light is the :root default; [data-theme="dark"] overrides. An inline script
+   in <head> sets data-theme before first paint, so there is no flash. */
+
+:root {
+  /* Gruvbox light */
+  --bg:        #fbf1c7;
+  --bg-soft:   #f2e5bc;
+  --bg-elev:   #ebdbb2;
+  --border:    #d5c4a1;
+  --fg:        #3c3836;
+  --fg-soft:   #504945;
+  --muted:     #7c6f64;
+  --accent:    #af3a03; /* orange */
+  --accent-2:  #427b58; /* aqua   */
+  --link:      #076678; /* blue   */
+  --link-hover:#af3a03;
+  --red:       #9d0006;
+  --yellow:    #b57614;
+  --green:     #79740e;
+  --code-bg:   #f2e5bc;
+  --code-fg:   #3c3836;
+  --shadow:    rgba(40, 40, 40, 0.10);
+}
+
+[data-theme="dark"] {
+  /* Gruvbox dark */
+  --bg:        #282828;
+  --bg-soft:   #32302f;
+  --bg-elev:   #3c3836;
+  --border:    #504945;
+  --fg:        #ebdbb2;
+  --fg-soft:   #d5c4a1;
+  --muted:     #928374;
+  --accent:    #fe8019; /* bright orange */
+  --accent-2:  #8ec07c; /* bright aqua   */
+  --link:      #83a598; /* bright blue   */
+  --link-hover:#fabd2f;
+  --red:       #fb4934;
+  --yellow:    #fabd2f;
+  --green:     #b8bb26;
+  --code-bg:   #1d2021;
+  --code-fg:   #ebdbb2;
+  --shadow:    rgba(0, 0, 0, 0.40);
+}
+
+/* No-JS fallback: honour the OS preference. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #282828; --bg-soft: #32302f; --bg-elev: #3c3836; --border: #504945;
+    --fg: #ebdbb2; --fg-soft: #d5c4a1; --muted: #928374;
+    --accent: #fe8019; --accent-2: #8ec07c; --link: #83a598; --link-hover: #fabd2f;
+    --red: #fb4934; --yellow: #fabd2f; --green: #b8bb26;
+    --code-bg: #1d2021; --code-fg: #ebdbb2; --shadow: rgba(0,0,0,0.40);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.container { width: 100%; max-width: 768px; margin: 0 auto; padding: 0 1.25rem; }
+.main { padding-top: 2.25rem; padding-bottom: 3rem; min-height: 60vh; }
+
+/* Links */
+a { color: var(--link); text-decoration: none; }
+a:hover { color: var(--link-hover); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Headings */
+h1, h2, h3, h4 { color: var(--fg); line-height: 1.25; font-weight: 700; }
+h1 { font-size: 2rem; margin: 0 0 1rem; }
+h2 { font-size: 1.4rem; margin: 2.25rem 0 0.75rem; }
+h3 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+p, ul, ol { margin: 0 0 1rem; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+/* Code */
+code, pre, kbd, samp {
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular,
+               "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+code {
+  background: var(--code-bg); color: var(--code-fg);
+  padding: 0.15em 0.4em; border-radius: 4px; border: 1px solid var(--border);
+}
+pre {
+  background: var(--code-bg); color: var(--code-fg);
+  padding: 1rem 1.1rem; border-radius: 8px; border: 1px solid var(--border);
+  overflow-x: auto; line-height: 1.5;
+}
+pre code { background: none; border: 0; padding: 0; }
+
+blockquote {
+  margin: 1.25rem 0; padding: 0.4rem 1.1rem;
+  border-left: 3px solid var(--accent); color: var(--fg-soft);
+  background: var(--bg-soft); border-radius: 0 6px 6px 0;
+}
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.95rem; }
+th, td { text-align: left; padding: 0.5rem 0.7rem; border: 1px solid var(--border); }
+th { background: var(--bg-elev); }
+tr:nth-child(even) td { background: var(--bg-soft); }
+
+/* ---- Header ---- */
+.site-header {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(140%) blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.site-header__inner {
+  display: flex; align-items: center; gap: 1rem;
+  min-height: 56px; flex-wrap: wrap;
+}
+.brand { display: inline-flex; align-items: center; gap: 0.5rem; font-weight: 800; color: var(--fg); }
+.brand:hover { text-decoration: none; color: var(--accent); }
+.brand__mark { font-size: 1.1rem; }
+.brand__name { letter-spacing: 0.5px; }
+
+.nav { display: flex; align-items: center; gap: 0.35rem 1rem; margin-left: auto; flex-wrap: wrap; }
+.nav__link { color: var(--fg-soft); font-size: 0.95rem; padding: 0.25rem 0; }
+.nav__link:hover { color: var(--accent); text-decoration: none; }
+.nav__link.is-active { color: var(--accent); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.nav__link--ext::after { content: " ↗"; font-size: 0.8em; color: var(--muted); }
+
+/* ---- Theme toggle ---- */
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font: inherit; font-size: 0.85rem; cursor: pointer;
+  color: var(--fg); background: var(--bg-elev);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.3rem 0.7rem; transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.theme-toggle:hover { border-color: var(--accent); }
+.theme-toggle__icon::before { content: "☾"; }
+[data-theme="dark"] .theme-toggle__icon::before { content: "☀"; }
+
+/* ---- Hero (home) ---- */
+.hero { padding: 1.5rem 0 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 1.75rem; }
+.hero__kicker { color: var(--accent); font-weight: 600; font-size: 0.8rem;
+                text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 0.4rem; }
+.hero__title { font-size: 2.75rem; margin: 0 0 0.5rem; }
+.hero__tagline { color: var(--fg-soft); font-size: 1.2rem; max-width: 36ch; margin: 0; }
+
+/* ---- Pages / posts ---- */
+.page__title { margin-bottom: 1.25rem; }
+.page-content :first-child { margin-top: 0; }
+
+.post-meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 0.25rem; }
+.post-back { margin-top: 2.5rem; }
+.post-tags { margin: 0.5rem 0 0; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.tag {
+  font-size: 0.75rem; color: var(--accent-2);
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.1rem 0.6rem;
+}
+
+/* ---- Post list (devlog / blog) ---- */
+.devlog { margin-top: 3rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+.devlog__head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.devlog__head h2 { margin: 0; }
+.more-link { font-size: 0.9rem; white-space: nowrap; }
+
+.post-list { list-style: none; margin: 1rem 0 0; padding: 0; }
+.post-item { padding: 1rem 0; border-bottom: 1px solid var(--border); }
+.post-item:last-child { border-bottom: 0; }
+.post-item__date { display: block; color: var(--muted); font-size: 0.8rem;
+                   font-family: ui-monospace, monospace; margin-bottom: 0.15rem; }
+.post-item__link { font-size: 1.15rem; font-weight: 600; }
+.post-item__desc { color: var(--fg-soft); margin: 0.25rem 0 0; }
+
+/* ---- Footer ---- */
+.site-footer { border-top: 1px solid var(--border); background: var(--bg-soft); }
+.site-footer__inner { padding: 1.75rem 1.25rem; }
+.site-footer__line { margin: 0 0 0.35rem; color: var(--fg-soft); }
+.site-footer__meta { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+/* ---- Comments ---- */
+.comments { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+
+@media (max-width: 540px) {
+  .hero__title { font-size: 2.1rem; }
+  .nav { gap: 0.25rem 0.75rem; }
+  .nav__link { font-size: 0.9rem; }
+}

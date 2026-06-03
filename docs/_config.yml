@@ -2,22 +2,31 @@ title: Ravn
 description: >-
   Small local-LLM agents that watch your Linux servers and report back in
   plain language.
-theme: minima
 url: "https://olafkfreund.github.io"
 baseurl: "/ravn-agents"
 
+# Custom Gruvbox theme lives in this repo (_layouts, _includes, assets) with a
+# runtime light/dark toggle — no theme gem.
 plugins:
   - jekyll-feed
   - jekyll-seo-tag
 
+repository: olafkfreund/ravn-agents
+github_username: olafkfreund
+
 header_pages:
+  - blog.md
   - roadmap.md
   - architecture.md
   - get-involved.md
 
-minima:
-  social_links:
-    github: olafkfreund/ravn-agents
+# Posts don't carry a `layout:`; default them to the post layout.
+defaults:
+  - scope:
+      path: ""
+      type: posts
+    values:
+      layout: post
 
 # Giscus comments (backed by GitHub Discussions).
 # To enable: turn on Discussions in repo settings, install the Giscus GitHub App

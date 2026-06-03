@@ -1,0 +1,14 @@
+<footer class="site-footer">
+  <div class="container site-footer__inner">
+    <p class="site-footer__line">
+      <span class="brand__mark" aria-hidden="true">🐦‍⬛</span>
+      {{ site.title | escape }} — {{ site.description | strip_newlines | escape }}
+    </p>
+    <p class="site-footer__meta">
+      <a href="https://github.com/{{ site.repository }}">Source</a> ·
+      <a href="https://github.com/{{ site.repository }}/issues">Issues</a> ·
+      <a href="{{ '/feed.xml' | relative_url }}">RSS</a> ·
+      MIT licensed
+    </p>
+  </div>
+</footer>

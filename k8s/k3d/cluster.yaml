@@ -1,0 +1,31 @@
+# k3d cluster for local Kubernetes testing (#53).
+#
+# Create with `k3d-up` (devenv script). The API server binds an uncommon host
+# port so it never collides with anything on the default 6443. One server +
+# one agent gives two nodes — enough to exercise the DaemonSet node agent (#56).
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ravn-dev
+# Pin a modern, supported k3s (the nixpkgs k3d default is an EOL v1.21). Bump
+# this deliberately so the test cluster tracks realistic Kubernetes APIs.
+image: rancher/k3s:v1.31.5-k3s1
+servers: 1
+agents: 1
+kubeAPI:
+  hostIP: "127.0.0.1"
+  hostPort: "16443"
+options:
+  k3d:
+    wait: true
+    timeout: "120s"
+  kubeconfig:
+    # Never touch the user's default kubeconfig; `k3d-up` writes a project-local
+    # one ($KUBECONFIG in the dev shell).
+    updateDefaultKubeconfig: false
+    switchCurrentContext: false
+  k3s:
+    nodeLabels:
+      - label: ravn.dev/role=test
+        nodeFilters:
+          - agent:0

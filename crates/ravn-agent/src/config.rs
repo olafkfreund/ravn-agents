@@ -34,6 +34,12 @@ pub struct Config {
     pub failed_units_enable: bool,
     /// Watch the per-user systemd manager instead of the system one.
     pub systemd_user_bus: bool,
+    /// Whether the update/NixOS-generation tap (#13) is enabled.
+    pub updates_enable: bool,
+    /// NixOS system profile symlink watched for generation changes.
+    pub nix_profile: PathBuf,
+    /// How often (seconds) the update tap polls the profile.
+    pub update_poll_secs: u64,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -67,6 +73,8 @@ struct FileDetection {
     config_drift: FileConfigDrift,
     #[serde(default)]
     failed_units: FileFailedUnits,
+    #[serde(default)]
+    updates: FileUpdates,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -77,6 +85,11 @@ struct FileConfigDrift {
 
 #[derive(Debug, Default, Deserialize)]
 struct FileFailedUnits {
+    enable: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileUpdates {
     enable: Option<bool>,
 }
 
@@ -147,6 +160,19 @@ impl Config {
 
         let systemd_user_bus = env_bool("RAVN_SYSTEMD_USER_BUS").unwrap_or(false);
 
+        let updates_enable = env_bool("RAVN_UPDATES")
+            .or(file.detection.updates.enable)
+            .unwrap_or(true);
+
+        let nix_profile = env_var("RAVN_NIX_PROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/nix/var/nix/profiles/system"));
+
+        let update_poll_secs = env_var("RAVN_UPDATE_POLL_SECS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30)
+            .max(1);
+
         Ok(Self {
             server_url,
             agent_id,
@@ -158,6 +184,9 @@ impl Config {
             config_drift_paths,
             failed_units_enable,
             systemd_user_bus,
+            updates_enable,
+            nix_profile,
+            update_poll_secs,
         })
     }
 }

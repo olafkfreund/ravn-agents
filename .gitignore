@@ -11,3 +11,9 @@ result-*
 
 # Node / portal
 node_modules/
+
+# Local SQLite offline buffer (agent dev runs)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

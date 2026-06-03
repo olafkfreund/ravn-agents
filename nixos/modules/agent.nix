@@ -9,6 +9,16 @@ let
 
   settingsFormat = pkgs.formats.toml { };
   configFile = settingsFormat.generate "ravn-agent.toml" cfg.settings;
+
+  # Resolve the GGUF model file from a path, or fetch a pinned URL into the store.
+  inferenceModelFile =
+    let m = cfg.inference.model;
+    in
+    if m.path != null then m.path
+    else if m.url != null then "${pkgs.fetchurl { url = m.url; sha256 = m.sha256; }}"
+    else null;
+
+  inferenceEndpoint = "http://${cfg.inference.host}:${toString cfg.inference.port}";
 in
 {
   options.services.ravn.agent = {
@@ -70,16 +80,69 @@ in
         type = types.bool;
         default = true;
         description = ''
-          Enable local CPU inference for event explanations (epic #2). The
-          `llama-server` unit itself is provided by a separate module (#15);
-          this only wires the agent to use it and sizes its resource slice.
+          Enable local CPU inference for event explanations (epic #2). When a
+          model is configured, runs `llama-server` as a sandboxed, loopback-only
+          systemd unit in the resource-capped `ravn-inference` slice (#15).
         '';
       };
+
+      package = mkPackageOption pkgs "llama-cpp" { };
+
       model = mkOption {
-        type = types.str;
-        default = "qwen3-1.7b-q4_k_m";
-        description = "Identifier of the pinned local model to use.";
+        default = { };
+        description = ''
+          The GGUF model to serve. Set `path` to a local file, or `url` + `sha256`
+          to fetch a pinned model into the store. If neither is set, the
+          llama-server unit is not created.
+        '';
+        type = types.submodule {
+          options = {
+            name = mkOption {
+              type = types.str;
+              default = "qwen3-1.7b-q4_k_m";
+              description = "Model identifier reported on events and in config.";
+            };
+            path = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "/var/lib/ravn/models/qwen3-1.7b-q4_k_m.gguf";
+              description = "Path to a GGUF model file on the host.";
+            };
+            url = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "URL of a GGUF model to fetch (pin with `sha256`).";
+            };
+            sha256 = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Hash for `url` (required when `url` is set).";
+            };
+          };
+        };
       };
+
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Address llama-server binds to (loopback by default).";
+      };
+      port = mkOption {
+        type = types.port;
+        default = 18181;
+        description = "Port llama-server listens on (loopback-only).";
+      };
+      contextSize = mkOption {
+        type = types.ints.positive;
+        default = 4096;
+        description = "Model context window (`--ctx-size`).";
+      };
+      threads = mkOption {
+        type = types.ints.unsigned;
+        default = 0;
+        description = "Inference threads (`--threads`); 0 lets llama.cpp choose.";
+      };
+
       cpuQuota = mkOption {
         type = types.str;
         default = "200%";
@@ -131,7 +194,8 @@ in
       };
       inference = mkIf cfg.inference.enable {
         enable = mkDefault true;
-        model = mkDefault cfg.inference.model;
+        model = mkDefault cfg.inference.model.name;
+        endpoint = mkDefault inferenceEndpoint;
       };
     };
 
@@ -143,6 +207,50 @@ in
       sliceConfig = {
         CPUQuota = cfg.inference.cpuQuota;
         MemoryMax = cfg.inference.memoryMax;
+      };
+    };
+
+    # llama-server (#15): sandboxed, loopback-only, in the inference slice.
+    # Only created once a model is configured.
+    systemd.services.ravn-llama = mkIf (cfg.inference.enable && inferenceModelFile != null) {
+      description = "Ravn local inference (llama-server)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      serviceConfig = {
+        ExecStart = lib.concatStringsSep " " ([
+          "${cfg.inference.package}/bin/llama-server"
+          "--model ${inferenceModelFile}"
+          "--host ${cfg.inference.host}"
+          "--port ${toString cfg.inference.port}"
+          "--ctx-size ${toString cfg.inference.contextSize}"
+        ] ++ optional (cfg.inference.threads > 0) "--threads ${toString cfg.inference.threads}");
+        Restart = "on-failure";
+        RestartSec = 5;
+        Slice = "ravn-inference.slice";
+
+        DynamicUser = true;
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        ProtectProc = "invisible";
+        RestrictSUIDSGID = true;
+        RestrictRealtime = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        # ggml may allocate executable memory — keep W^X relaxed for inference only.
+        MemoryDenyWriteExecute = false;
+        # Loopback-only: bind 127.0.0.1 and refuse non-local traffic.
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        IPAddressAllow = "localhost";
+        IPAddressDeny = "any";
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" "~@privileged" ];
+        UMask = "0077";
       };
     };
 

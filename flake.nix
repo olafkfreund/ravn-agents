@@ -116,6 +116,7 @@
               server.url = "nats://control.example.com:4222";
               enrollment.bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
               detection.configDrift.paths = [ "/etc/nixos" ];
+              inference.model.path = "/var/lib/ravn/models/qwen3-1.7b-q4_k_m.gguf";
             };
           })
         ];

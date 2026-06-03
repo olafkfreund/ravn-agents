@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Gruvbox palette, matching the marketing site. Light is :root; dark overrides
+   via [data-theme="dark"]. An inline script in index.html sets the attribute
+   before first paint. */
+:root {
+  --bg: #fbf1c7;
+  --bg-soft: #f2e5bc;
+  --bg-elev: #ebdbb2;
+  --border: #d5c4a1;
+  --fg: #3c3836;
+  --fg-soft: #504945;
+  --muted: #7c6f64;
+  --accent: #af3a03;
+  --accent-2: #427b58;
+  --link: #076678;
+  --red: #9d0006;
+  --yellow: #b57614;
+  --green: #79740e;
+  --blue: #076678;
+}
+
+[data-theme="dark"] {
+  --bg: #282828;
+  --bg-soft: #32302f;
+  --bg-elev: #3c3836;
+  --border: #504945;
+  --fg: #ebdbb2;
+  --fg-soft: #d5c4a1;
+  --muted: #928374;
+  --accent: #fe8019;
+  --accent-2: #8ec07c;
+  --link: #83a598;
+  --red: #fb4934;
+  --yellow: #fabd2f;
+  --green: #b8bb26;
+  --blue: #83a598;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: theme("fontFamily.sans");
+}

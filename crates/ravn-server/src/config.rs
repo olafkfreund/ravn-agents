@@ -25,6 +25,23 @@ pub struct Config {
     /// Authenticated HTTP ingest config (#57). `Some` enables `/ingest` with
     /// ServiceAccount-token (OIDC/JWKS) validation.
     pub ingest_auth: Option<IngestAuthConfig>,
+    /// Shared inference endpoint for explaining K8s events (#58). `Some`
+    /// enables async explanation generation.
+    pub inference: Option<InferenceConfig>,
+}
+
+/// Configuration for the shared inference endpoint (#58).
+#[derive(Debug, Clone)]
+pub struct InferenceConfig {
+    /// OpenAI-compatible base URL. `RAVN_INFERENCE_ENDPOINT`
+    /// (e.g. `http://inference.svc/v1`).
+    pub endpoint: String,
+    /// Model name to request. `RAVN_INFERENCE_MODEL`, default `default`.
+    pub model: String,
+    /// Optional bearer API key. `RAVN_INFERENCE_API_KEY` / `_FILE`.
+    pub api_key: Option<String>,
+    /// Request timeout in seconds. `RAVN_INFERENCE_TIMEOUT_SECS`, default 30.
+    pub timeout_secs: u64,
 }
 
 /// Configuration for the authenticated HTTP ingest endpoint (#57).
@@ -86,6 +103,7 @@ impl Config {
 
         let enroll = Self::enroll_from_env(&token)?;
         let ingest_auth = Self::ingest_auth_from_env(&token)?;
+        let inference = Self::inference_from_env(&token)?;
 
         Ok(Self {
             bind,
@@ -96,7 +114,35 @@ impl Config {
             viewer_token,
             enroll,
             ingest_auth,
+            inference,
         })
+    }
+
+    /// Assemble inference config; `None` (disabled) when no endpoint is set.
+    fn inference_from_env(
+        token: &impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Option<InferenceConfig>> {
+        let Some(endpoint) = token("RAVN_INFERENCE_ENDPOINT") else {
+            return Ok(None);
+        };
+        let model = token("RAVN_INFERENCE_MODEL").unwrap_or_else(|| "default".to_string());
+        let api_key = match token("RAVN_INFERENCE_API_KEY") {
+            Some(k) => Some(k),
+            None => match token("RAVN_INFERENCE_API_KEY_FILE") {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading RAVN_INFERENCE_API_KEY_FILE at {path}"))?
+                        .trim()
+                        .to_string(),
+                ),
+                None => None,
+            },
+        };
+        let timeout_secs = std::env::var("RAVN_INFERENCE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        Ok(Some(InferenceConfig { endpoint, model, api_key, timeout_secs }))
     }
 
     /// Assemble ingest-auth config. Enabled only when the issuer *and* a JWKS

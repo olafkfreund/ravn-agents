@@ -91,6 +91,25 @@ pub async fn insert_message(pool: &PgPool, msg: &Message) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Attach (or replace) an event's LLM explanation, generated asynchronously by
+/// the control plane for K8s events (#58). The partition key `occurred_at` is
+/// in the WHERE so the UPDATE targets a single partition.
+pub async fn update_explanation(
+    pool: &PgPool,
+    id: Uuid,
+    occurred_at: DateTime<Utc>,
+    explanation: &ravn_core::Explanation,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE events SET explanation = $3 WHERE id = $1 AND occurred_at = $2")
+        .bind(id)
+        .bind(occurred_at)
+        .bind(sqlx::types::Json(explanation))
+        .execute(pool)
+        .await
+        .context("updating event explanation")?;
+    Ok(())
+}
+
 /// Build the API/wire `StoredEvent` shape from a `Message` (for live fan-out).
 pub fn message_to_stored(msg: &Message) -> StoredEvent {
     let ev = &msg.event;

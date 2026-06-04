@@ -9,6 +9,7 @@ mod auth;
 mod ca;
 mod config;
 mod db;
+mod inference;
 mod ingest;
 mod metrics;
 mod state;
@@ -77,6 +78,27 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Shared inference endpoint for async K8s-event explanations (#58).
+    let inference = match &config.inference {
+        Some(cfg) => {
+            tracing::info!(
+                endpoint = %cfg.endpoint,
+                model = %cfg.model,
+                "K8s-event inference enabled (async explanations)"
+            );
+            Some(std::sync::Arc::new(inference::InferenceClient::new(
+                cfg.endpoint.clone(),
+                cfg.model.clone(),
+                cfg.api_key.clone(),
+                std::time::Duration::from_secs(cfg.timeout_secs),
+            )))
+        }
+        None => {
+            tracing::info!("K8s-event inference disabled — set RAVN_INFERENCE_ENDPOINT");
+            None
+        }
+    };
+
     let app_state = AppState {
         pool,
         nats,
@@ -87,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         ca,
         enroll_token,
         ingest_auth,
+        inference,
     };
 
     // Spawn the ingestion loops (events + heartbeats).

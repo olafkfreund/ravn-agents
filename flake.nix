@@ -64,6 +64,16 @@
           meta.mainProgram = "ravn-server";
         });
 
+        # The Kubernetes binaries (#55/#56): controller + node-agent, both from
+        # the ravn-k8s crate. One package, two bins.
+        ravn-k8s = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "ravn-k8s";
+          cargoExtraArgs = "-p ravn-k8s";
+          doCheck = false;
+          meta.mainProgram = "ravn-controller";
+        });
+
         # Reproducible OCI images (#37). Load with `docker load < $(nix build .#ravn-server-image --print-out-paths)`.
         ravn-server-image = pkgs.dockerTools.buildLayeredImage {
           name = "ravn-server";
@@ -81,15 +91,26 @@
           contents = [ ravn-agent pkgs.cacert ];
           config.Entrypoint = [ "${ravn-agent}/bin/ravnd" ];
         };
+
+        # One image carries both K8s binaries; the DaemonSet overrides the
+        # entrypoint to run `ravn-node-agent`. `cacert` so rustls can verify
+        # the control-plane / inference TLS chain.
+        ravn-k8s-image = pkgs.dockerTools.buildLayeredImage {
+          name = "ravn-k8s";
+          tag = "latest";
+          contents = [ ravn-k8s pkgs.cacert ];
+          config.Entrypoint = [ "${ravn-k8s}/bin/ravn-controller" ];
+        };
       in
       {
         packages = {
-          inherit ravn-agent ravn-server ravn-agent-image ravn-server-image;
+          inherit ravn-agent ravn-server ravn-k8s
+            ravn-agent-image ravn-server-image ravn-k8s-image;
           default = ravn-server;
         };
 
         checks = {
-          inherit ravn-agent ravn-server;
+          inherit ravn-agent ravn-server ravn-k8s;
 
           # Whole-workspace clippy and tests gate `nix flake check`.
           workspace-clippy = craneLib.cargoClippy (commonArgs // {

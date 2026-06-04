@@ -1,0 +1,74 @@
+# ravn-node-agent (#56): a DaemonSet, one pod per node, watching this node's
+# status conditions. Detection-only via the API — no hostPath, no privileged
+# access. (The optional container-stdout / node-OS journald taps from #56 would
+# add a tightly-scoped read-only hostPath here; left out by default.)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ravn-node-agent
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: node-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: node-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ravn
+        app.kubernetes.io/component: node-agent
+    spec:
+      serviceAccountName: ravn-node-agent
+      # Run on every node, including control-plane/tainted nodes.
+      tolerations:
+        - operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: node-agent
+          image: ravn-k8s:latest
+          imagePullPolicy: IfNotPresent
+          command: ["ravn-node-agent"]
+          env:
+            # Scope the watch to this node (downward API).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RAVN_INGEST_URL
+              value: "https://ravn-control-plane.example.com/ingest"
+            - name: RAVN_SA_TOKEN_FILE
+              value: "/var/run/secrets/ravn/token"
+            - name: RAVN_CLUSTER
+              value: "default"
+            - name: RAVN_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+          volumeMounts:
+            - name: ravn-token
+              mountPath: /var/run/secrets/ravn
+              readOnly: true
+      volumes:
+        - name: ravn-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: ravn
+                  expirationSeconds: 3600

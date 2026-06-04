@@ -1,0 +1,78 @@
+# Least-privilege, read-only RBAC for the Ravn agents (#59). Detection-only:
+# the agents never mutate cluster state, so every verb is get/list/watch.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-controller
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-node-agent
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: node-agent
+---
+# The controller watches the Events API (cluster-wide) and reads Pods for
+# context.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ravn-controller
+  labels:
+    app.kubernetes.io/part-of: ravn
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+# The node-agent watches Node status conditions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ravn-node-agent
+  labels:
+    app.kubernetes.io/part-of: ravn
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ravn-controller
+  labels:
+    app.kubernetes.io/part-of: ravn
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ravn-controller
+subjects:
+  - kind: ServiceAccount
+    name: ravn-controller
+    namespace: ravn-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ravn-node-agent
+  labels:
+    app.kubernetes.io/part-of: ravn
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ravn-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: ravn-node-agent
+    namespace: ravn-system

@@ -314,17 +314,18 @@ async fn enroll(
 }
 
 /// Authenticated HTTP ingest (#57): in-cluster agents POST a [`Message`] with
-/// their projected ServiceAccount token as a bearer credential, validated
-/// against the cluster's OIDC JWKS. Self-authenticating, so it is exempt from
-/// the API's admin/viewer bearer auth.
+/// their projected ServiceAccount token as a bearer credential. The token is
+/// validated against the cluster's OIDC JWKS (#57) and/or via Kubernetes
+/// TokenReview (#102). Self-authenticating, so it is exempt from the API's
+/// admin/viewer bearer auth.
 async fn ingest(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(message): Json<ravn_core::Message>,
 ) -> Response {
-    let Some(auth) = state.ingest_auth.as_ref() else {
+    if state.ingest_auth.is_none() && state.ingest_token_review.is_none() {
         return (StatusCode::NOT_FOUND, "authenticated ingest is not enabled").into_response();
-    };
+    }
 
     let token = headers
         .get(AUTHORIZATION)
@@ -334,14 +335,25 @@ async fn ingest(
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
 
-    match auth.validate(token) {
-        Ok(claims) => {
+    // Try local JWKS validation first (no network); fall back to TokenReview.
+    let mut identity = state.ingest_auth.as_ref().and_then(|a| a.validate(token).ok());
+    if identity.is_none() {
+        if let Some(tr) = state.ingest_token_review.as_ref() {
+            match tr.validate(token).await {
+                Ok(claims) => identity = Some(claims),
+                Err(error) => tracing::debug!(%error, "TokenReview rejected token"),
+            }
+        }
+    }
+
+    match identity {
+        Some(claims) => {
             tracing::debug!(sub = %claims.sub, event_id = %message.event.id, "authenticated ingest");
             crate::ingest::persist_message(&state, &message).await;
             (StatusCode::ACCEPTED, "accepted").into_response()
         }
-        Err(error) => {
-            tracing::warn!(%error, "rejected ingest: invalid ServiceAccount token");
+        None => {
+            tracing::warn!("rejected ingest: invalid ServiceAccount token");
             (StatusCode::UNAUTHORIZED, "invalid token").into_response()
         }
     }

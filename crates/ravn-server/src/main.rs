@@ -17,7 +17,7 @@ mod state;
 use anyhow::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::auth::{IngestAuth, UserAuth};
+use crate::auth::{IngestAuth, TokenReviewValidator, UserAuth};
 use crate::config::{Config, IngestAuthConfig, JwksSource, OidcConfig};
 use crate::state::{AppState, OidcPublic};
 
@@ -118,6 +118,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Kubernetes TokenReview fallback for ingest auth (#102).
+    let ingest_token_review = match &config.ingest_token_review {
+        Some(cfg) => {
+            let v = TokenReviewValidator::new(
+                &cfg.api_url,
+                cfg.bearer.clone(),
+                cfg.ca_pem.as_deref(),
+                cfg.audience.clone(),
+            )
+            .context("initializing TokenReview validator")?;
+            tracing::info!(api = %cfg.api_url, "ingest TokenReview fallback enabled");
+            Some(std::sync::Arc::new(v))
+        }
+        None => None,
+    };
+
     let app_state = AppState {
         pool,
         nats,
@@ -128,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         ca,
         enroll_token,
         ingest_auth,
+        ingest_token_review,
         inference,
         user_auth,
         oidc_public,

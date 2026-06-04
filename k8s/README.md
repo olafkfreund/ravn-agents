@@ -146,8 +146,22 @@ Verified live against this k3d cluster: a token minted with
 `kubectl create token default -n ravn-test --audience=ravn` is accepted
 (`202`) and persisted, while a missing or invalid token is rejected (`401`).
 
-> **Follow-up:** the Kubernetes `TokenReview` *fallback* named in #57 is not yet
-> implemented — the OIDC/JWKS default path is. Tracked for a later pass.
+### TokenReview fallback (#102)
+
+When the cluster's OIDC JWKS isn't reachable from the (external) control plane,
+it can instead validate presented SA tokens via the Kubernetes **TokenReview**
+API. Configure it alongside or instead of JWKS — the `/ingest` handler tries
+local JWKS validation first, then TokenReview:
+
+| Server env var | Purpose | Default |
+| --- | --- | --- |
+| `RAVN_INGEST_TOKENREVIEW_URL` | Cluster API base (enables the fallback) | — |
+| `RAVN_INGEST_TOKENREVIEW_TOKEN` / `_FILE` | Control-plane credential (needs `system:auth-delegator`) | — |
+| `RAVN_INGEST_TOKENREVIEW_CA_FILE` | PEM CA bundle for the cluster API TLS | system roots |
+| `RAVN_INGEST_AUDIENCE` | Audience the token must be valid for | `ravn` |
+
+Verified (mock TokenReview API): an authenticated token is accepted (`202`),
+an unauthenticated one rejected (`401`).
 
 ## Inference for K8s events (#58)
 

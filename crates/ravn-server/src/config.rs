@@ -25,6 +25,10 @@ pub struct Config {
     /// Authenticated HTTP ingest config (#57). `Some` enables `/ingest` with
     /// ServiceAccount-token (OIDC/JWKS) validation.
     pub ingest_auth: Option<IngestAuthConfig>,
+    /// Kubernetes TokenReview fallback for ingest auth (#102). `Some` lets the
+    /// control plane validate agent SA tokens via the cluster API when JWKS
+    /// validation is unavailable.
+    pub ingest_token_review: Option<TokenReviewConfig>,
     /// Shared inference endpoint for explaining K8s events (#58). `Some`
     /// enables async explanation generation.
     pub inference: Option<InferenceConfig>,
@@ -87,6 +91,23 @@ pub struct IngestAuthConfig {
     pub jwks_source: JwksSource,
 }
 
+/// Kubernetes TokenReview fallback for ingest auth (#102).
+#[derive(Debug, Clone)]
+pub struct TokenReviewConfig {
+    /// Cluster API base URL. `RAVN_INGEST_TOKENREVIEW_URL`
+    /// (`/apis/authentication.k8s.io/v1/tokenreviews` is appended).
+    pub api_url: String,
+    /// Bearer the control plane authenticates to the API with (needs
+    /// `system:auth-delegator`). `RAVN_INGEST_TOKENREVIEW_TOKEN[_FILE]`.
+    pub bearer: String,
+    /// Optional PEM CA bundle for the cluster API TLS.
+    /// `RAVN_INGEST_TOKENREVIEW_CA_FILE`.
+    pub ca_pem: Option<String>,
+    /// Audience the presented token must be valid for. `RAVN_INGEST_AUDIENCE`,
+    /// default `ravn`.
+    pub audience: String,
+}
+
 /// Source of the OIDC JWKS document.
 #[derive(Debug, Clone)]
 pub enum JwksSource {
@@ -131,6 +152,7 @@ impl Config {
 
         let enroll = Self::enroll_from_env(&token)?;
         let ingest_auth = Self::ingest_auth_from_env(&token)?;
+        let ingest_token_review = Self::token_review_from_env(&token)?;
         let inference = Self::inference_from_env(&token)?;
         let oidc = Self::oidc_from_env(&token)?;
 
@@ -143,9 +165,40 @@ impl Config {
             viewer_token,
             enroll,
             ingest_auth,
+            ingest_token_review,
             inference,
             oidc,
         })
+    }
+
+    /// Assemble the TokenReview fallback config; `None` when no API URL is set.
+    fn token_review_from_env(
+        token: &impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Option<TokenReviewConfig>> {
+        let Some(api_url) = token("RAVN_INGEST_TOKENREVIEW_URL") else {
+            return Ok(None);
+        };
+        let bearer = match token("RAVN_INGEST_TOKENREVIEW_TOKEN") {
+            Some(t) => t,
+            None => match token("RAVN_INGEST_TOKENREVIEW_TOKEN_FILE") {
+                Some(path) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading RAVN_INGEST_TOKENREVIEW_TOKEN_FILE at {path}"))?
+                    .trim()
+                    .to_string(),
+                None => anyhow::bail!(
+                    "RAVN_INGEST_TOKENREVIEW_URL set but no credential — set RAVN_INGEST_TOKENREVIEW_TOKEN or _TOKEN_FILE"
+                ),
+            },
+        };
+        let ca_pem = match token("RAVN_INGEST_TOKENREVIEW_CA_FILE") {
+            Some(path) => Some(
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading RAVN_INGEST_TOKENREVIEW_CA_FILE at {path}"))?,
+            ),
+            None => None,
+        };
+        let audience = token("RAVN_INGEST_AUDIENCE").unwrap_or_else(|| "ravn".to_string());
+        Ok(Some(TokenReviewConfig { api_url, bearer, ca_pem, audience }))
     }
 
     /// Assemble portal OIDC config; `None` (disabled) when no issuer is set.

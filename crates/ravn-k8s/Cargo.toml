@@ -6,9 +6,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Shared library: config + NATS publisher + the per-source mapping/watch loops,
+# reused by both the controller and the node-agent binaries.
+[lib]
+name = "ravn_k8s"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ravn-controller"
-path = "src/main.rs"
+path = "src/bin/ravn-controller.rs"
+
+# DaemonSet node-agent (#56): one per node, detects node-level conditions.
+[[bin]]
+name = "ravn-node-agent"
+path = "src/bin/ravn-node-agent.rs"
 
 [dependencies]
 ravn-core.workspace = true

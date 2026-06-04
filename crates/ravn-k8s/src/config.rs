@@ -18,6 +18,10 @@ pub struct Config {
     /// all namespaces (the production default — controller has cluster-wide
     /// read-only RBAC).
     pub namespace: Option<String>,
+    /// The node this agent runs on (`NODE_NAME`, set via the downward API in
+    /// the DaemonSet). `None` outside a node context; the node-agent restricts
+    /// its watch to this node and records it as the event `host`.
+    pub node_name: Option<String>,
 }
 
 impl Config {
@@ -40,6 +44,8 @@ impl Config {
 
         let namespace = std::env::var("RAVN_K8S_NAMESPACE").ok().filter(|s| !s.is_empty());
 
-        Ok(Self { nats_url, agent_id, host, namespace })
+        let node_name = std::env::var("NODE_NAME").ok().filter(|s| !s.is_empty());
+
+        Ok(Self { nats_url, agent_id, host, namespace, node_name })
     }
 }

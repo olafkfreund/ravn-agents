@@ -1,5 +1,5 @@
 //! ravn-controller (#55): a read-only cluster controller that watches the
-//! Kubernetes API for workload failure signals — `OOMKilled`,
+//! Kubernetes Events API for workload failure signals — `OOMKilled`,
 //! `CrashLoopBackOff`, `BackOff`, `FailedScheduling`, `ImagePullBackOff`,
 //! probe `Unhealthy`, evictions — and publishes each as a ravn-core
 //! `KubeWorkload` Message to the control plane.
@@ -8,13 +8,9 @@
 //! CPU-only daemon, while this needs the heavy kube-rs client and a wholly
 //! different in-cluster RBAC/Deployment story (#57/#59). Both share `ravn-core`.
 
-mod config;
-mod mapping;
-mod nats;
-mod watcher;
-
 use anyhow::Context;
 use kube::Client;
+use ravn_k8s::{config::Config, nats::Publisher, watcher};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -23,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_env("RAVN_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let config = config::Config::from_env()?;
+    let config = Config::from_env()?;
     tracing::info!(
         agent_id = %config.agent_id.0,
         host = %config.host,
@@ -31,13 +27,11 @@ async fn main() -> anyhow::Result<()> {
         "ravn-controller starting"
     );
 
-    // Infers in-cluster config (ServiceAccount) when deployed, or the local
-    // kubeconfig / KUBECONFIG when run outside the cluster.
     let client = Client::try_default()
         .await
         .context("building Kubernetes client (in-cluster or kubeconfig)")?;
 
-    let publisher = nats::Publisher::connect(&config.nats_url, config.agent_id).await?;
+    let publisher = Publisher::connect(&config.nats_url, config.agent_id).await?;
     tracing::info!("NATS connected");
 
     watcher::run(client, config.namespace, config.agent_id, config.host, publisher).await

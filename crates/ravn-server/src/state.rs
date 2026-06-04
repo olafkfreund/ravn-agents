@@ -5,6 +5,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
+use crate::auth::IngestAuth;
 use crate::ca::Ca;
 use crate::db::StoredEvent;
 use crate::metrics::Metrics;
@@ -27,4 +28,7 @@ pub struct AppState {
     pub ca: Option<Arc<Ca>>,
     /// Bootstrap token agents present to enroll. Paired with `ca`.
     pub enroll_token: Option<String>,
+    /// ServiceAccount-token validator for the authenticated HTTP ingest
+    /// endpoint (#57). `None` disables `/ingest`.
+    pub ingest_auth: Option<Arc<IngestAuth>>,
 }

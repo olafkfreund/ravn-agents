@@ -16,7 +16,7 @@ use kube::{Api, Client};
 use ravn_core::AgentId;
 
 use crate::mapping::event_to_message;
-use crate::nats::Publisher;
+use crate::publish::Publisher;
 
 /// Watch the cluster for workload signals until the stream ends.
 pub async fn run(

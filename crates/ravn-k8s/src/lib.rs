@@ -11,7 +11,9 @@
 //! consistent across sources.
 
 pub mod config;
+pub mod http;
 pub mod mapping;
 pub mod nats;
 pub mod node;
+pub mod publish;
 pub mod watcher;

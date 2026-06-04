@@ -313,6 +313,40 @@ async fn enroll(
     .into_response()
 }
 
+/// Authenticated HTTP ingest (#57): in-cluster agents POST a [`Message`] with
+/// their projected ServiceAccount token as a bearer credential, validated
+/// against the cluster's OIDC JWKS. Self-authenticating, so it is exempt from
+/// the API's admin/viewer bearer auth.
+async fn ingest(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(message): Json<ravn_core::Message>,
+) -> Response {
+    let Some(auth) = state.ingest_auth.as_ref() else {
+        return (StatusCode::NOT_FOUND, "authenticated ingest is not enabled").into_response();
+    };
+
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let Some(token) = token else {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    };
+
+    match auth.validate(token) {
+        Ok(claims) => {
+            tracing::debug!(sub = %claims.sub, event_id = %message.event.id, "authenticated ingest");
+            crate::ingest::persist_message(&state, &message).await;
+            (StatusCode::ACCEPTED, "accepted").into_response()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "rejected ingest: invalid ServiceAccount token");
+            (StatusCode::UNAUTHORIZED, "invalid token").into_response()
+        }
+    }
+}
+
 /// Constant-time byte comparison, to keep token checks free of timing leaks.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -323,7 +357,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Endpoints reachable without auth even when tokens are configured.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ready" | "/metrics" | "/enroll")
+    matches!(path, "/ready" | "/metrics" | "/enroll" | "/ingest")
 }
 
 /// API access role (#26).
@@ -398,6 +432,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ws/events", get(ws_events))
         .route("/metrics", get(metrics))
         .route("/enroll", axum::routing::post(enroll))
+        .route("/ingest", axum::routing::post(ingest))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

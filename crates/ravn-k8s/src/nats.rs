@@ -5,13 +5,13 @@
 use anyhow::Context;
 use ravn_core::{AgentId, Message};
 
-/// A connected outbound NATS publisher bound to the controller's subject.
-pub struct Publisher {
+/// A connected outbound NATS publisher bound to the agent's subject.
+pub struct NatsPublisher {
     client: async_nats::Client,
     subject: String,
 }
 
-impl Publisher {
+impl NatsPublisher {
     /// Connect to NATS, retrying the initial connect with backoff.
     pub async fn connect(url: &str, agent_id: AgentId) -> anyhow::Result<Self> {
         let client = async_nats::ConnectOptions::new()

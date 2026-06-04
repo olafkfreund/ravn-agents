@@ -113,3 +113,38 @@ Both binaries were verified live against this k3d cluster: the controller maps
 the `crasher` pod's `BackOff` to a `KubeWorkload` signal, and the node-agent
 emits `NodeNotReady` when a node's container is stopped — each flowing through
 NATS → control plane → `/api/events`.
+
+## Authenticated ingest (#57)
+
+In-cluster agents can authenticate to the control plane with their projected
+**ServiceAccount token** instead of publishing to an unauthenticated NATS
+subject. Set `RAVN_INGEST_URL` and the agents publish over HTTP, presenting the
+token (re-read each publish so kubelet rotation is picked up) as a bearer
+credential:
+
+```sh
+RAVN_INGEST_URL=https://ravn-control-plane/ingest \
+RAVN_SA_TOKEN_FILE=/var/run/secrets/ravn/token \
+  ravn-controller   # or ravn-node-agent
+```
+
+A DaemonSet/Deployment mounts an **audience-bound projected token** (audience
+`ravn`) at `RAVN_SA_TOKEN_FILE` (#59 wires the volume).
+
+The control plane validates each token against the cluster's **OIDC JWKS** —
+verifying the RS256 signature, issuer, audience, and expiry locally (no
+per-request API-server call). Enable it on the server with:
+
+| Server env var | Purpose | Default |
+| --- | --- | --- |
+| `RAVN_INGEST_OIDC_ISSUER` | Cluster OIDC issuer (enables `/ingest`) | — |
+| `RAVN_INGEST_OIDC_JWKS_URL` | Fetch the JWKS over HTTPS at startup | — |
+| `RAVN_INGEST_OIDC_JWKS_FILE` | …or read the JWKS from a file (mounted ConfigMap) | — |
+| `RAVN_INGEST_AUDIENCE` | Required token audience | `ravn` |
+
+Verified live against this k3d cluster: a token minted with
+`kubectl create token default -n ravn-test --audience=ravn` is accepted
+(`202`) and persisted, while a missing or invalid token is rejected (`401`).
+
+> **Follow-up:** the Kubernetes `TokenReview` *fallback* named in #57 is not yet
+> implemented — the OIDC/JWKS default path is. Tracked for a later pass.

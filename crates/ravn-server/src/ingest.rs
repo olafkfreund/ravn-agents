@@ -30,25 +30,7 @@ pub async fn run(state: AppState) {
 
     while let Some(nats_msg) = sub.next().await {
         match serde_json::from_slice::<Message>(&nats_msg.payload) {
-            Ok(message) => {
-                if let Err(error) = db::insert_message(&state.pool, &message).await {
-                    tracing::error!(%error, event_id = %message.event.id, "failed to persist message");
-                    state.metrics.ingest_errors.inc();
-                } else {
-                    if let Err(error) =
-                        db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
-                    {
-                        tracing::warn!(%error, "failed to update agent registry");
-                    }
-                    let severity = serde_json::to_value(message.event.severity)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_string))
-                        .unwrap_or_default();
-                    state.metrics.events_ingested.with_label_values(&[&severity]).inc();
-                    // Fan out to live WebSocket subscribers (#29); ignored if none.
-                    let _ = state.events_tx.send(db::message_to_stored(&message));
-                }
-            }
+            Ok(message) => persist_message(&state, &message).await,
             Err(error) => {
                 // A malformed payload is dropped, not retried — it will never parse.
                 state.metrics.ingest_errors.inc();
@@ -58,6 +40,29 @@ pub async fn run(state: AppState) {
     }
 
     tracing::info!("ingestion loop ended");
+}
+
+/// Persist a validated [`Message`]: insert it, refresh the agent registry,
+/// count it, and fan it out to live WebSocket subscribers. Shared by the NATS
+/// loop and the authenticated HTTP ingest endpoint (#57).
+pub async fn persist_message(state: &AppState, message: &Message) {
+    if let Err(error) = db::insert_message(&state.pool, message).await {
+        tracing::error!(%error, event_id = %message.event.id, "failed to persist message");
+        state.metrics.ingest_errors.inc();
+        return;
+    }
+    if let Err(error) =
+        db::touch_agent(&state.pool, message.event.agent_id.0, &message.event.host).await
+    {
+        tracing::warn!(%error, "failed to update agent registry");
+    }
+    let severity = serde_json::to_value(message.event.severity)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    state.metrics.events_ingested.with_label_values(&[&severity]).inc();
+    // Fan out to live WebSocket subscribers (#29); ignored if none.
+    let _ = state.events_tx.send(db::message_to_stored(message));
 }
 
 /// Subscribe to heartbeats and refresh the agent registry (#20).

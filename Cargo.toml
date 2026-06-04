@@ -5,6 +5,7 @@ members = [
   "crates/ravn-agent",
   "crates/ravn-server",
   "crates/ravn-eval",
+  "crates/ravn-k8s",
 ]
 
 [workspace.package]

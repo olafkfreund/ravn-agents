@@ -68,7 +68,7 @@ impl InferenceClient {
                 { "role": "system", "content": SYSTEM_PROMPT },
                 { "role": "user", "content": build_user_prompt(event) },
             ],
-            "max_tokens": 320,
+            "max_tokens": 512,
             "temperature": 0.2,
         });
 
@@ -153,7 +153,48 @@ pub fn parse_explanation(content: &str) -> (String, Option<String>) {
             }
         }
     }
+    // Lenient last resort: a verbose small model can hit max_tokens and emit
+    // *truncated* JSON that won't parse. Pull the string fields out by hand so
+    // the portal shows the sentence, not raw `{"explanation": ...`.
+    if let Some(text) = extract_string_field(content, "explanation") {
+        let check = extract_string_field(content, "suggested_check").filter(|s| !s.is_empty());
+        return (text.trim().to_string(), check);
+    }
     (content.trim().to_string(), None)
+}
+
+/// Extract a JSON string field's value by name, tolerating a truncated object
+/// (returns what was read so far if the closing quote is missing). Handles the
+/// common backslash escapes.
+fn extract_string_field(content: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let rest = &content[content.find(&needle)? + needle.len()..];
+    let after_colon = rest[rest.find(':')? + 1..].trim_start();
+    let mut chars = after_colon.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in chars {
+        if escaped {
+            out.push(match c {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                other => other, // covers " \ / and anything else
+            });
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some(out);
+        } else {
+            out.push(c);
+        }
+    }
+    // Truncated before the closing quote — return the partial value.
+    (!out.is_empty()).then_some(out)
 }
 
 #[cfg(test)]
@@ -190,6 +231,27 @@ mod tests {
             parse_explanation("Sure!\n{\"explanation\": \"OOM.\", \"suggested_check\": \"free -m\"} hope that helps");
         assert_eq!(text, "OOM.");
         assert_eq!(check.as_deref(), Some("free -m"));
+    }
+
+    #[test]
+    fn recovers_explanation_from_truncated_json() {
+        // A verbose model hit max_tokens mid-object: the explanation closed but
+        // suggested_check was cut off. We must still show the sentence.
+        let content =
+            r#"{"explanation": "The pod is crash-looping because the container keeps exiting.", "s"#;
+        let (text, check) = parse_explanation(content);
+        assert_eq!(text, "The pod is crash-looping because the container keeps exiting.");
+        assert!(check.is_none());
+        assert!(!text.starts_with('{'), "must not leak raw JSON into the text");
+    }
+
+    #[test]
+    fn recovers_both_fields_from_unterminated_object() {
+        // Whole object never closed (no final }), both string values intact.
+        let content = r#"{"explanation": "OOMKilled.", "suggested_check": "kubectl top pod"#;
+        let (text, check) = parse_explanation(content);
+        assert_eq!(text, "OOMKilled.");
+        assert_eq!(check.as_deref(), Some("kubectl top pod"));
     }
 
     #[test]

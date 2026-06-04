@@ -1,0 +1,76 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-controller
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-controller
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: ravn-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.nodeAgent.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-node-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-node-agent
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-node-agent
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: ravn-node-agent
+    namespace: {{ .Release.Namespace }}
+{{- end }}

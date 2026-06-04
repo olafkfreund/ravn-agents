@@ -1,0 +1,70 @@
+# ravn-controller (#55): one cluster-wide Deployment watching the Events API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ravn-controller
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ravn
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: ravn-controller
+      # Keep the default API token mounted — kube-rs uses it to authenticate
+      # the in-cluster watch. The separate projected `ravn-token` below (a
+      # distinct audience) is what the control-plane ingest validates.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ravn-k8s:latest
+          imagePullPolicy: IfNotPresent
+          command: ["ravn-controller"]
+          env:
+            # Authenticated HTTP ingest (#57): point at your control plane and
+            # present the projected ServiceAccount token (audience `ravn`).
+            - name: RAVN_INGEST_URL
+              value: "https://ravn-control-plane.example.com/ingest"
+            - name: RAVN_SA_TOKEN_FILE
+              value: "/var/run/secrets/ravn/token"
+            - name: RAVN_CLUSTER
+              value: "default"
+            - name: RAVN_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: ravn-token
+              mountPath: /var/run/secrets/ravn
+              readOnly: true
+      volumes:
+        # Audience-bound projected token the control plane validates via OIDC.
+        - name: ravn-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: ravn
+                  expirationSeconds: 3600

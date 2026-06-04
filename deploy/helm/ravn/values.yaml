@@ -1,0 +1,44 @@
+# Default values for the Ravn agents chart.
+
+image:
+  repository: ravn-k8s
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Control plane the agents publish to. By design the control plane runs outside
+# the constrained cluster (D2); set `ingestUrl` to its authenticated HTTP
+# ingest endpoint (#57). `tokenAudience` must match the server's
+# RAVN_INGEST_AUDIENCE.
+controlPlane:
+  ingestUrl: "https://ravn-control-plane.example.com/ingest"
+  tokenAudience: ravn
+  tokenPath: /var/run/secrets/ravn/token
+
+# Cluster identity recorded on every event (event `host`).
+cluster: default
+logLevel: info
+
+# The cluster-wide workload controller (#55).
+controller:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# The per-node DaemonSet (#56).
+nodeAgent:
+  enabled: true
+  # Run on every node, including tainted/control-plane nodes.
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi

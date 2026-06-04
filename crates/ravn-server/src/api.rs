@@ -347,6 +347,15 @@ async fn ingest(
     }
 }
 
+/// Look up a key in a URL query string. Values are returned as-is — JWT bearer
+/// tokens contain only URL-safe characters, so no decoding is needed (#101).
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
 /// Constant-time byte comparison, to keep token checks free of timing leaks.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -419,14 +428,20 @@ async fn auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Res
         return next.run(req).await; // probes + metrics + auth-config are public
     }
 
-    let token = req
+    // Prefer the Authorization header; fall back to the `access_token` query
+    // param. Browsers cannot set headers on a WebSocket upgrade, so the live
+    // feed (/ws/events) presents its bearer in the query (#101).
+    let header_token = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let token = header_token.or_else(|| query_param(req.uri().query(), "access_token"));
     let Some(token) = token else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
+    let token = token.as_str();
 
     // Static token first (cheap, no crypto); then a user OIDC token.
     let mut role = role_for(token, state.admin_token.as_deref(), state.viewer_token.as_deref());
@@ -501,6 +516,14 @@ mod tests {
     // Exercises only the stateless system routes — no DB/NATS required, so
     // these run in the hermetic Nix build. `/ready` is covered by an ignored
     // live integration test (see tests below) that needs real services.
+    #[test]
+    fn query_param_extracts_access_token() {
+        assert_eq!(query_param(Some("a=1&access_token=abc.def.ghi&b=2"), "access_token").as_deref(), Some("abc.def.ghi"));
+        assert_eq!(query_param(Some("access_token=xyz"), "access_token").as_deref(), Some("xyz"));
+        assert_eq!(query_param(Some("foo=bar"), "access_token"), None);
+        assert_eq!(query_param(None, "access_token"), None);
+    }
+
     async fn get_json(path: &str) -> (StatusCode, serde_json::Value) {
         let resp = system_router()
             .oneshot(Request::get(path).body(Body::empty()).unwrap())

@@ -79,3 +79,37 @@ RAVN_K8S_NAMESPACE=ravn-test RAVN_CLUSTER=ravn-dev cargo run -p ravn-k8s
 | `RAVN_CONTROLLER_ID` | Stable identity (UUID); publish subject + event `agent_id` | generated |
 | `RAVN_CLUSTER` | Cluster name recorded as event `host` | `$HOSTNAME` / `kubernetes` |
 | `RAVN_K8S_NAMESPACE` | Restrict the watch to one namespace | all namespaces |
+
+## ravn-node-agent (#56)
+
+The same `ravn-k8s` crate also builds `ravn-node-agent`: a **DaemonSet** (one
+pod per node) that watches its own Node's `.status.conditions` and publishes
+node-level problems as `KubeNode` Messages — memory / disk / PID pressure, and
+`Ready != True` → `NodeNotReady`. Severity comes from the shared
+`kube_severity_for_reason` table, so a node and a workload signal of the same
+class agree.
+
+It restricts its watch to its own node via the downward-API `NODE_NAME`, and
+emits a signal only on the **transition** into an unhealthy condition (and
+re-arms once it clears), so a node under sustained pressure yields one signal,
+not one per watch tick.
+
+```sh
+# Watches all nodes when NODE_NAME is unset (local dev); a DaemonSet sets
+# NODE_NAME to scope each pod to its own node.
+RAVN_CLUSTER=ravn-dev cargo run -p ravn-k8s --bin ravn-node-agent
+```
+
+| Env var | Purpose | Default |
+| --- | --- | --- |
+| `NODE_NAME` | The node to watch + record as `host` (downward API in the DaemonSet) | all nodes |
+| `NATS_URL` / `RAVN_CONTROLLER_ID` / `RAVN_CLUSTER` | As for the controller above | — |
+
+The container-stdout and node-OS journald (read-only hostPath) taps named in
+#56 are deferred to the manifest work (#59), where the hostPath and
+tightly-scoped securityContext wiring lives.
+
+Both binaries were verified live against this k3d cluster: the controller maps
+the `crasher` pod's `BackOff` to a `KubeWorkload` signal, and the node-agent
+emits `NodeNotReady` when a node's container is stopped — each flowing through
+NATS → control plane → `/api/events`.

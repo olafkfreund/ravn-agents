@@ -84,7 +84,7 @@ Server env:
 | --- | --- | --- |
 | `RAVN_OIDC_ISSUER` | IdP issuer URL (enables user auth) | — |
 | `RAVN_OIDC_JWKS_URL` / `_FILE` | IdP JWKS source | — |
-| `RAVN_OIDC_AUDIENCE` | Expected token audience (the OIDC client id) | — |
+| `RAVN_OIDC_AUDIENCE` | Expected token audience (the OIDC client id) | **required** |
 | `RAVN_OIDC_CLIENT_ID` | Public client id the SPA uses (defaults to audience) | — |
 | `RAVN_OIDC_GROUPS_CLAIM` | Claim holding group memberships | `groups` |
 | `RAVN_OIDC_ADMIN_GROUP` | Group granting admin (mutating API) | — |
@@ -97,7 +97,10 @@ The portal discovers config from the public `GET /auth/config`, performs the
 token as a bearer; `GET /api/me` returns the caller's role for role-aware UI
 (e.g. viewers see labels read-only).
 
-Notes / follow-ups: tokens are validated as **RS256** (the common OIDC default);
-the IdP must issue access tokens whose audience matches `RAVN_OIDC_AUDIENCE`.
+Notes / follow-ups: tokens are validated as **RS256** (the common OIDC default).
+`RAVN_OIDC_AUDIENCE` is **mandatory** when OIDC is enabled and the IdP must issue
+access tokens whose audience matches it — the control plane fails to start
+otherwise, so audience validation is never silently skipped (prevents
+token-audience confusion across relying parties on a shared IdP).
 The live WebSocket feed (`/ws/events`) does not yet carry the bearer, so under
 user auth the portal falls back to polling for updates — a tracked follow-up.

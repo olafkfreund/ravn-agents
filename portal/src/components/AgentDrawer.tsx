@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { setLabels, type Agent, type StoredEvent } from "../lib/api";
 import { absoluteTime, relativeTime, severityVar, sourceLabel, statusMeta } from "../lib/format";
+import { useAuth } from "../lib/AuthContext";
 
 interface Entry {
   key: string;
@@ -31,6 +32,7 @@ export function AgentDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [agent, onClose]);
 
+  const { isAdmin } = useAuth();
   const save = useMutation({
     mutationFn: (vars: { id: string; labels: Record<string, string> }) => setLabels(vars.id, vars.labels),
     onSuccess: () => {
@@ -100,57 +102,83 @@ export function AgentDrawer({
               {save.isSuccess && !save.isPending && <span className="text-xs text-sev-notice">saved ✓</span>}
               {save.isError && <span className="text-xs text-sev-error">save failed</span>}
             </div>
-            <div className="space-y-2">
-              {entries.map((e, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input
-                    value={e.key}
-                    onChange={(ev) =>
-                      setEntries((p) => p.map((x, j) => (j === i ? { ...x, key: ev.target.value } : x)))
-                    }
-                    placeholder="key (e.g. env)"
-                    className="w-1/3 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
-                  />
-                  <span className="text-fg-mute">:</span>
-                  <input
-                    value={e.value}
-                    onChange={(ev) =>
-                      setEntries((p) => p.map((x, j) => (j === i ? { ...x, value: ev.target.value } : x)))
-                    }
-                    placeholder="value (e.g. prod)"
-                    className="flex-1 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
-                  />
+            {isAdmin ? (
+              <>
+                <div className="space-y-2">
+                  {entries.map((e, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        value={e.key}
+                        onChange={(ev) =>
+                          setEntries((p) => p.map((x, j) => (j === i ? { ...x, key: ev.target.value } : x)))
+                        }
+                        placeholder="key (e.g. env)"
+                        className="w-1/3 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
+                      />
+                      <span className="text-fg-mute">:</span>
+                      <input
+                        value={e.value}
+                        onChange={(ev) =>
+                          setEntries((p) => p.map((x, j) => (j === i ? { ...x, value: ev.target.value } : x)))
+                        }
+                        placeholder="value (e.g. prod)"
+                        className="flex-1 rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs text-fg focus:border-accent focus-ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEntries((p) => p.filter((_, j) => j !== i))}
+                        aria-label="Remove label"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-fg-mute hover:border-sev-error hover:text-sev-error"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setEntries((p) => p.filter((_, j) => j !== i))}
-                    aria-label="Remove label"
-                    className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-fg-mute hover:border-sev-error hover:text-sev-error"
+                    onClick={() => setEntries((p) => [...p, { key: "", value: "" }])}
+                    className="rounded-md border border-line px-2.5 py-1 text-xs text-fg-dim hover:border-accent hover:text-fg"
                   >
-                    ✕
+                    + Add label
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSave}
+                    disabled={save.isPending}
+                    className="rounded-md border border-accent bg-accent/15 px-3 py-1 text-xs font-semibold text-accent hover:bg-accent/25 disabled:opacity-50"
+                  >
+                    {save.isPending ? "Saving…" : "Save"}
                   </button>
                 </div>
-              ))}
-            </div>
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setEntries((p) => [...p, { key: "", value: "" }])}
-                className="rounded-md border border-line px-2.5 py-1 text-xs text-fg-dim hover:border-accent hover:text-fg"
-              >
-                + Add label
-              </button>
-              <button
-                type="button"
-                onClick={onSave}
-                disabled={save.isPending}
-                className="rounded-md border border-accent bg-accent/15 px-3 py-1 text-xs font-semibold text-accent hover:bg-accent/25 disabled:opacity-50"
-              >
-                {save.isPending ? "Saving…" : "Save"}
-              </button>
-            </div>
-            <p className="mt-1.5 text-[11px] text-fg-mute">
-              Labels are the grouping dimensions used by the Topology view.
-            </p>
+                <p className="mt-1.5 text-[11px] text-fg-mute">
+                  Labels are the grouping dimensions used by the Topology view.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {entries.filter((e) => e.key).length === 0 ? (
+                    <span className="text-xs text-fg-mute">No labels.</span>
+                  ) : (
+                    entries
+                      .filter((e) => e.key)
+                      .map((e, i) => (
+                        <span
+                          key={i}
+                          className="rounded-md border border-line bg-bg px-2 py-0.5 font-mono text-xs text-fg-dim"
+                        >
+                          {e.key}: {e.value}
+                        </span>
+                      ))
+                  )}
+                </div>
+                <p className="mt-1.5 text-[11px] text-fg-mute">
+                  Viewer role — labels are read-only.
+                </p>
+              </>
+            )}
           </div>
 
           <div>

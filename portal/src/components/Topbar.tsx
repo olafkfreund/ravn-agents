@@ -1,4 +1,5 @@
 import { ThemeToggle } from "./ThemeToggle";
+import { useAuth } from "../lib/AuthContext";
 
 interface TopbarProps {
   title: string;
@@ -7,6 +8,7 @@ interface TopbarProps {
 }
 
 export function Topbar({ title, onMenu, live }: TopbarProps) {
+  const { required, user, role, logout } = useAuth();
   return (
     <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-line bg-bg/80 px-4 backdrop-blur-md md:px-6">
       <button
@@ -40,6 +42,27 @@ export function Topbar({ title, onMenu, live }: TopbarProps) {
           </span>
         </span>
         <ThemeToggle />
+
+        {required && user && (
+          <div className="flex items-center gap-2">
+            <span
+              className="hidden items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-xs text-fg-dim sm:flex"
+              title={`Signed in as ${user} (${role})`}
+            >
+              <span className="max-w-[12rem] truncate">{user}</span>
+              <span className="rounded bg-sev-notice/15 px-1.5 py-0.5 font-mono uppercase tracking-wider text-sev-notice">
+                {role}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={logout}
+              className="rounded-lg border border-line px-3 py-1 text-xs text-fg-dim hover:text-fg"
+            >
+              Sign out
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

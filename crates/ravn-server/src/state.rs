@@ -5,11 +5,20 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
-use crate::auth::IngestAuth;
+use crate::auth::{IngestAuth, UserAuth};
 use crate::ca::Ca;
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
 use crate::metrics::Metrics;
+
+/// Public OIDC settings the portal SPA needs to start the auth-code+PKCE flow
+/// (#26). Served at `/auth/config`; contains no secrets.
+#[derive(Clone, serde::Serialize)]
+pub struct OidcPublic {
+    pub issuer: String,
+    pub client_id: String,
+    pub scopes: String,
+}
 
 /// Cloneable handle to the control plane's runtime dependencies.
 #[derive(Clone)]
@@ -35,4 +44,9 @@ pub struct AppState {
     /// Shared inference client for async K8s-event explanations (#58). `None`
     /// disables explanation generation.
     pub inference: Option<Arc<InferenceClient>>,
+    /// Portal user OIDC validator (#26). `None` disables user OIDC (static
+    /// tokens still apply).
+    pub user_auth: Option<Arc<UserAuth>>,
+    /// Public OIDC settings served to the SPA at `/auth/config` (#26).
+    pub oidc_public: Option<OidcPublic>,
 }

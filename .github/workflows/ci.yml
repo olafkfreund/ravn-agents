@@ -36,3 +36,15 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  e2e-k8s:
+    name: e2e (k3d controller)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+      - name: Install k3d
+        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+      - name: Run the Kubernetes controller e2e
+        run: ./scripts/e2e-k8s.sh

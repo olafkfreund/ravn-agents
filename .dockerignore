@@ -1,0 +1,13 @@
+# Keep the Docker build context small and reproducible. Without this the
+# context balloons to tens of GB (Rust target/, devenv state, git history).
+target/
+.git/
+.devenv/
+.direnv/
+result
+result-*
+node_modules/
+portal/node_modules/
+portal/dist/
+.devenv.flake.nix
+*.log

@@ -31,6 +31,8 @@ or wrong model degrades the wording, never the alerting.
 
 ### Get started
 
+- **See it in action** — the [Showcase]({{ '/showcase/' | relative_url }}) walks
+  through the live portal and a real Kubernetes OOMKill, explained by the model.
 - Read the [Architecture]({{ '/architecture/' | relative_url }}) and
   [Roadmap]({{ '/roadmap/' | relative_url }}).
 - Come [Get Involved]({{ '/get-involved/' | relative_url }}) — issues are organised

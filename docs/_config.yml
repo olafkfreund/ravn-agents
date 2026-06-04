@@ -15,6 +15,7 @@ repository: olafkfreund/ravn-agents
 github_username: olafkfreund
 
 header_pages:
+  - showcase.md
   - blog.md
   - roadmap.md
   - architecture.md

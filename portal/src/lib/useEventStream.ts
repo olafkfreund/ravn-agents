@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { StoredEvent } from "./api";
+import { getToken } from "./auth";
 
 /**
  * Subscribe to the live event WebSocket (#29). While `enabled`, new events are
@@ -12,7 +13,11 @@ export function useEventStream(enabled: boolean): StoredEvent[] {
   useEffect(() => {
     if (!enabled) return;
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${window.location.host}/ws/events`;
+    // Browsers can't set an Authorization header on a WebSocket, so when user
+    // auth is on we present the bearer in the query string (#101).
+    const token = getToken();
+    const auth = token ? `?access_token=${encodeURIComponent(token)}` : "";
+    const url = `${proto}://${window.location.host}/ws/events${auth}`;
     let ws: WebSocket | null = null;
     let closed = false;
 

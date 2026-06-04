@@ -1,0 +1,28 @@
+[package]
+name = "ravn-k8s"
+description = "ravn-controller: watches the Kubernetes API for workload signals and publishes them as ravn-core Messages."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ravn-controller"
+path = "src/main.rs"
+
+[dependencies]
+ravn-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-nats = "0.38"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v7"] }
+chrono = "0.4"
+# Read-only Kubernetes informer client. k8s-openapi is pinned to the cluster
+# minor (v1.31, matching the k3d test cluster) so generated types line up.
+kube = { version = "0.96", default-features = false, features = ["client", "runtime", "rustls-tls"] }
+k8s-openapi = { version = "0.23", features = ["v1_31"] }

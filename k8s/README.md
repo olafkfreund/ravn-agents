@@ -43,6 +43,39 @@ kubectl get events -n ravn-test --field-selector involvedObject.name=crasher
 k9s -n ravn-test
 ```
 
-The `crasher` events are exactly what the controller (#55) will watch via the
+The `crasher` events are exactly what the controller (#55) watches via the
 Events API, mapping each `reason` to a severity with
 `ravn_core::kube_severity_for_reason`.
+
+## ravn-controller (#55)
+
+`crates/ravn-k8s` builds the `ravn-controller` binary: a read-only cluster
+controller that watches core/v1 Events with a kube-rs informer and publishes
+each workload failure (`OOMKilled`, `CrashLoopBackOff`, `BackOff`,
+`FailedScheduling`, `ImagePullBackOff`, probe `Unhealthy`, evictions) to the
+control plane as a `KubeWorkload` Message — on the same `ravn.messages.<id>`
+NATS subject the host agent uses, so existing ingestion handles it unchanged.
+
+It runs as its **own binary**, not a `ravnd --mode`: the host agent is a small
+CPU-only daemon, while the controller pulls the heavy kube-rs client and has a
+wholly different in-cluster RBAC/Deployment story (#57/#59). Both share
+`ravn-core`.
+
+Routine `Normal` lifecycle events (`Started`, `Pulled`, …) are dropped; only
+`Warning` events and reasons rated `Error`+ surface. Signals are de-duplicated
+on the Event UID and re-emitted only when the aggregated `count` advances, so a
+flapping pod yields one signal per genuine new occurrence.
+
+Run it against the local cluster from the dev shell (it reads `$KUBECONFIG`
+and `$NATS_URL` from the shell):
+
+```sh
+RAVN_K8S_NAMESPACE=ravn-test RAVN_CLUSTER=ravn-dev cargo run -p ravn-k8s
+```
+
+| Env var | Purpose | Default |
+| --- | --- | --- |
+| `NATS_URL` | Control-plane NATS | `nats://127.0.0.1:4222` |
+| `RAVN_CONTROLLER_ID` | Stable identity (UUID); publish subject + event `agent_id` | generated |
+| `RAVN_CLUSTER` | Cluster name recorded as event `host` | `$HOSTNAME` / `kubernetes` |
+| `RAVN_K8S_NAMESPACE` | Restrict the watch to one namespace | all namespaces |

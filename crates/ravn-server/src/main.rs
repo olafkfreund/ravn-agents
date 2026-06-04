@@ -17,9 +17,9 @@ mod state;
 use anyhow::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::auth::IngestAuth;
-use crate::config::{Config, IngestAuthConfig, JwksSource};
-use crate::state::AppState;
+use crate::auth::{IngestAuth, UserAuth};
+use crate::config::{Config, IngestAuthConfig, JwksSource, OidcConfig};
+use crate::state::{AppState, OidcPublic};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -99,6 +99,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Portal user OIDC + RBAC (#26).
+    let (user_auth, oidc_public) = match &config.oidc {
+        Some(cfg) => {
+            let ua = build_user_auth(cfg).await.context("initializing user OIDC auth")?;
+            let client_id = cfg.client_id.clone().unwrap_or_default();
+            tracing::info!(
+                issuer = %cfg.issuer,
+                admin_group = cfg.admin_group.as_deref().unwrap_or("<none>"),
+                "portal user OIDC enabled (bearer JWT + RBAC)"
+            );
+            let public = OidcPublic { issuer: cfg.issuer.clone(), client_id, scopes: cfg.scopes.clone() };
+            (Some(std::sync::Arc::new(ua)), Some(public))
+        }
+        None => {
+            tracing::info!("portal user OIDC disabled — set RAVN_OIDC_ISSUER + JWKS");
+            (None, None)
+        }
+    };
+
     let app_state = AppState {
         pool,
         nats,
@@ -110,6 +129,8 @@ async fn main() -> anyhow::Result<()> {
         enroll_token,
         ingest_auth,
         inference,
+        user_auth,
+        oidc_public,
     };
 
     // Spawn the ingestion loops (events + heartbeats).
@@ -134,7 +155,26 @@ async fn main() -> anyhow::Result<()> {
 /// validator. Fetched once at startup; rotating cluster signing keys requires
 /// a restart (acceptable for M0 — keys rotate on the order of months).
 async fn build_ingest_auth(cfg: &IngestAuthConfig) -> anyhow::Result<IngestAuth> {
-    let jwks_json = match &cfg.jwks_source {
+    let jwks_json = load_jwks(&cfg.jwks_source).await?;
+    IngestAuth::new(cfg.issuer.clone(), cfg.audience.clone(), &jwks_json)
+}
+
+/// Build the portal user OIDC validator from config (#26).
+async fn build_user_auth(cfg: &OidcConfig) -> anyhow::Result<UserAuth> {
+    let jwks_json = load_jwks(&cfg.jwks_source).await?;
+    UserAuth::new(
+        cfg.issuer.clone(),
+        cfg.audience.clone(),
+        &jwks_json,
+        cfg.groups_claim.clone(),
+        cfg.admin_group.clone(),
+        cfg.viewer_group.clone(),
+    )
+}
+
+/// Load a JWKS document from a URL (fetched at startup) or a local file.
+async fn load_jwks(source: &JwksSource) -> anyhow::Result<String> {
+    match source {
         JwksSource::Url(url) => reqwest::get(url)
             .await
             .with_context(|| format!("fetching JWKS from {url}"))?
@@ -142,11 +182,11 @@ async fn build_ingest_auth(cfg: &IngestAuthConfig) -> anyhow::Result<IngestAuth>
             .context("JWKS endpoint returned an error status")?
             .text()
             .await
-            .context("reading JWKS response body")?,
-        JwksSource::File(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading JWKS file {path}"))?,
-    };
-    IngestAuth::new(cfg.issuer.clone(), cfg.audience.clone(), &jwks_json)
+            .context("reading JWKS response body"),
+        JwksSource::File(path) => {
+            std::fs::read_to_string(path).with_context(|| format!("reading JWKS file {path}"))
+        }
+    }
 }
 
 /// Initialize structured logging. `RUST_LOG` wins; otherwise the configured

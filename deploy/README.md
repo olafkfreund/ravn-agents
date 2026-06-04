@@ -69,3 +69,35 @@ Key values (`deploy/helm/ravn/values.yaml`):
 `helm lint`, `helm template … | kubectl apply --dry-run=client`, and
 `kubectl apply --dry-run=client -f deploy/k8s/` all pass. End-to-end deploy on
 kind/k3d is covered by #60.
+
+## Portal user authentication (OIDC + RBAC) (#26)
+
+Human access to the portal/API can be gated by **OpenID Connect** with
+viewer/admin roles. The control plane validates the user's OIDC access token
+(Bearer) against the IdP's JWKS — RS256 signature, issuer, audience, expiry —
+statelessly, and maps a groups claim to a role. The static
+`RAVN_ADMIN_TOKEN`/`RAVN_VIEWER_TOKEN` remain as a dev/bootstrap fallback.
+
+Server env:
+
+| Var | Purpose | Default |
+| --- | --- | --- |
+| `RAVN_OIDC_ISSUER` | IdP issuer URL (enables user auth) | — |
+| `RAVN_OIDC_JWKS_URL` / `_FILE` | IdP JWKS source | — |
+| `RAVN_OIDC_AUDIENCE` | Expected token audience (the OIDC client id) | — |
+| `RAVN_OIDC_CLIENT_ID` | Public client id the SPA uses (defaults to audience) | — |
+| `RAVN_OIDC_GROUPS_CLAIM` | Claim holding group memberships | `groups` |
+| `RAVN_OIDC_ADMIN_GROUP` | Group granting admin (mutating API) | — |
+| `RAVN_OIDC_VIEWER_GROUP` | If set, group required for any access | — (any authed = viewer) |
+| `RAVN_OIDC_SCOPES` | Scopes the SPA requests | `openid profile email groups` |
+
+RBAC: safe methods (GET) need viewer; mutating methods (PUT/DELETE) need admin.
+The portal discovers config from the public `GET /auth/config`, performs the
+**authorization-code + PKCE** flow against the IdP, and presents the access
+token as a bearer; `GET /api/me` returns the caller's role for role-aware UI
+(e.g. viewers see labels read-only).
+
+Notes / follow-ups: tokens are validated as **RS256** (the common OIDC default);
+the IdP must issue access tokens whose audience matches `RAVN_OIDC_AUDIENCE`.
+The live WebSocket feed (`/ws/events`) does not yet carry the bearer, so under
+user auth the portal falls back to polling for updates — a tracked follow-up.

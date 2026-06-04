@@ -1,5 +1,6 @@
 import createClient from "openapi-fetch";
 import type { components, paths } from "../api/schema";
+import { clearToken, getToken } from "./auth";
 
 /** A persisted event, as returned by the control plane. */
 export type StoredEvent = components["schemas"]["StoredEvent"];
@@ -15,6 +16,34 @@ export type TopologyNode = components["schemas"]["TopologyNode"];
  *  baseUrl is empty: in dev, Vite proxies /api to the backend; in prod the
  *  portal is served from the same origin as the API. */
 export const api = createClient<paths>({ baseUrl: "" });
+
+// Attach the user's bearer token (#26) to every API call, and drop it on 401
+// so the app falls back to the login screen.
+api.use({
+  onRequest({ request }) {
+    const token = getToken();
+    if (token) request.headers.set("Authorization", `Bearer ${token}`);
+    return request;
+  },
+  onResponse({ response }) {
+    if (response.status === 401) clearToken();
+    return response;
+  },
+});
+
+/** API access role resolved by the control plane for the current user. */
+export type Role = "admin" | "viewer";
+
+/** The caller's role from `/api/me` (admin when auth is disabled). */
+export async function getMe(): Promise<Role> {
+  const token = getToken();
+  const res = await fetch("/api/me", {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error("Failed to resolve role");
+  const data = (await res.json()) as { role: Role };
+  return data.role;
+}
 
 /** Fetch recent events, newest first. */
 export async function listEvents(limit = 100): Promise<StoredEvent[]> {

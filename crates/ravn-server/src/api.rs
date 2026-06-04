@@ -357,17 +357,39 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Endpoints reachable without auth even when tokens are configured.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ready" | "/metrics" | "/enroll" | "/ingest")
+    matches!(path, "/ready" | "/metrics" | "/enroll" | "/ingest" | "/auth/config")
 }
 
-/// API access role (#26).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Viewer,
-    Admin,
+/// The caller's resolved role (#26), for role-aware portal UI. Behind auth, so
+/// a missing role extension means auth is disabled → full (admin) access.
+async fn me(role: Option<axum::Extension<Role>>) -> Response {
+    let role = role.map(|axum::Extension(r)| r).unwrap_or(Role::Admin);
+    let role = match role {
+        Role::Admin => "admin",
+        Role::Viewer => "viewer",
+    };
+    Json(serde_json::json!({ "role": role })).into_response()
 }
 
-/// Resolve a bearer token to a role.
+/// Public auth configuration for the SPA (#26): whether user OIDC is enabled
+/// and, if so, the issuer / client id / scopes it needs to start the
+/// auth-code+PKCE flow. No secrets.
+async fn auth_config(State(state): State<AppState>) -> Response {
+    match &state.oidc_public {
+        Some(o) => Json(serde_json::json!({
+            "enabled": true,
+            "issuer": o.issuer,
+            "clientId": o.client_id,
+            "scopes": o.scopes,
+        }))
+        .into_response(),
+        None => Json(serde_json::json!({ "enabled": false })).into_response(),
+    }
+}
+
+use crate::auth::Role;
+
+/// Resolve a static bearer token to a role (dev/bootstrap path).
 fn role_for(token: &str, admin: Option<&str>, viewer: Option<&str>) -> Option<Role> {
     if admin == Some(token) {
         Some(Role::Admin)
@@ -384,13 +406,17 @@ fn authorized(method: &axum::http::Method, role: Role) -> bool {
     method.is_safe() || role == Role::Admin
 }
 
-/// Bearer-token auth + RBAC. No-op when no tokens are configured.
+/// Bearer-token auth + RBAC. No-op when no auth is configured. Accepts a static
+/// admin/viewer token (dev/bootstrap) or a portal user OIDC token (#26), whose
+/// role is derived from the user's groups.
 async fn auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if state.admin_token.is_none() && state.viewer_token.is_none() {
+    let auth_enabled =
+        state.admin_token.is_some() || state.viewer_token.is_some() || state.user_auth.is_some();
+    if !auth_enabled {
         return next.run(req).await; // auth disabled
     }
     if is_public(req.uri().path()) {
-        return next.run(req).await; // probes + metrics are public
+        return next.run(req).await; // probes + metrics + auth-config are public
     }
 
     let token = req
@@ -398,14 +424,33 @@ async fn auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Res
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "));
+    let Some(token) = token else {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    };
 
-    let Some(role) = token.and_then(|t| {
-        role_for(t, state.admin_token.as_deref(), state.viewer_token.as_deref())
-    }) else {
+    // Static token first (cheap, no crypto); then a user OIDC token.
+    let mut role = role_for(token, state.admin_token.as_deref(), state.viewer_token.as_deref());
+    if role.is_none() {
+        if let Some(user_auth) = state.user_auth.as_ref() {
+            match user_auth.authorize(token) {
+                Ok(Some(r)) => role = Some(r),
+                Ok(None) => {
+                    return (StatusCode::FORBIDDEN, "authenticated but not in an allowed group")
+                        .into_response()
+                }
+                Err(error) => tracing::debug!(%error, "user OIDC token rejected"),
+            }
+        }
+    }
+
+    let Some(role) = role else {
         return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
     };
 
     if authorized(req.method(), role) {
+        // Surface the resolved role to handlers (e.g. /api/me).
+        let mut req = req;
+        req.extensions_mut().insert(role);
         next.run(req).await
     } else {
         (StatusCode::FORBIDDEN, "admin role required").into_response()
@@ -433,6 +478,8 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/enroll", axum::routing::post(enroll))
         .route("/ingest", axum::routing::post(ingest))
+        .route("/auth/config", get(auth_config))
+        .route("/api/me", get(me))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

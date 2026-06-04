@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 
-use crate::auth::{IngestAuth, UserAuth};
+use crate::auth::{IngestAuth, TokenReviewValidator, UserAuth};
 use crate::ca::Ca;
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
@@ -39,8 +39,10 @@ pub struct AppState {
     /// Bootstrap token agents present to enroll. Paired with `ca`.
     pub enroll_token: Option<String>,
     /// ServiceAccount-token validator for the authenticated HTTP ingest
-    /// endpoint (#57). `None` disables `/ingest`.
+    /// endpoint (#57). `None` disables JWKS validation.
     pub ingest_auth: Option<Arc<IngestAuth>>,
+    /// Kubernetes TokenReview fallback for ingest auth (#102).
+    pub ingest_token_review: Option<Arc<TokenReviewValidator>>,
     /// Shared inference client for async K8s-event explanations (#58). `None`
     /// disables explanation generation.
     pub inference: Option<Arc<InferenceClient>>,

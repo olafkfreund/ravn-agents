@@ -86,6 +86,93 @@ impl IngestAuth {
     }
 }
 
+/// Kubernetes `TokenReview` fallback for ingest auth (#102): validate a
+/// presented ServiceAccount token by asking the cluster API, instead of
+/// verifying a JWKS signature locally. Useful when the cluster's OIDC JWKS is
+/// not reachable from the (external) control plane. Requires the control plane
+/// to hold a credential with `system:auth-delegator`-style access.
+pub struct TokenReviewValidator {
+    http: reqwest::Client,
+    url: String,
+    bearer: String,
+    audience: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TokenReviewResponse {
+    #[serde(default)]
+    status: TokenReviewStatus,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TokenReviewStatus {
+    #[serde(default)]
+    authenticated: bool,
+    #[serde(default)]
+    user: ReviewUser,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ReviewUser {
+    #[serde(default)]
+    username: String,
+}
+
+impl TokenReviewValidator {
+    /// Build a validator. `api_url` is the cluster API base; the TokenReview
+    /// path is appended. `ca_pem` (optional) is the API server's CA bundle.
+    pub fn new(
+        api_url: &str,
+        bearer: String,
+        ca_pem: Option<&str>,
+        audience: String,
+    ) -> anyhow::Result<Self> {
+        let mut builder = reqwest::Client::builder();
+        if let Some(pem) = ca_pem {
+            builder = builder
+                .add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).context("parsing TokenReview CA")?);
+        }
+        let http = builder.build().context("building TokenReview HTTP client")?;
+        let url = format!(
+            "{}/apis/authentication.k8s.io/v1/tokenreviews",
+            api_url.trim_end_matches('/')
+        );
+        Ok(Self { http, url, bearer, audience })
+    }
+
+    /// Submit a TokenReview for `token` and return its identity if the cluster
+    /// reports it authenticated for our audience.
+    pub async fn validate(&self, token: &str) -> anyhow::Result<SaClaims> {
+        let body = serde_json::json!({
+            "apiVersion": "authentication.k8s.io/v1",
+            "kind": "TokenReview",
+            "spec": { "token": token, "audiences": [self.audience] },
+        });
+        let resp = self
+            .http
+            .post(&self.url)
+            .bearer_auth(&self.bearer)
+            .json(&body)
+            .send()
+            .await
+            .context("calling TokenReview API")?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("TokenReview API returned {status}");
+        }
+        let review: TokenReviewResponse = resp.json().await.context("parsing TokenReview response")?;
+        if !review.status.authenticated {
+            anyhow::bail!(
+                "token not authenticated{}",
+                review.status.error.map(|e| format!(": {e}")).unwrap_or_default()
+            );
+        }
+        Ok(SaClaims { sub: review.status.user.username })
+    }
+}
+
 /// Validates portal **user** OIDC tokens and maps a claim to an API [`Role`]
 /// (#26). Stateless: the SPA obtains an OIDC token from the IdP and presents it
 /// as a bearer; the control plane verifies it against the IdP's JWKS and
@@ -341,6 +428,22 @@ fv0uzdhEI+5TFOnO7jqhncO6
         let token = user_token(serde_json::json!("staff ravn-admins"));
         let role = user_auth(Some("ravn-admins"), None).authorize(&token).unwrap();
         assert_eq!(role, Some(Role::Admin));
+    }
+
+    #[test]
+    fn token_review_response_parses_authenticated() {
+        let json = r#"{"status":{"authenticated":true,"user":{"username":"system:serviceaccount:ravn:ravn-controller","groups":["g"]}}}"#;
+        let r: TokenReviewResponse = serde_json::from_str(json).unwrap();
+        assert!(r.status.authenticated);
+        assert_eq!(r.status.user.username, "system:serviceaccount:ravn:ravn-controller");
+    }
+
+    #[test]
+    fn token_review_response_parses_unauthenticated() {
+        let json = r#"{"status":{"authenticated":false,"error":"invalid bearer token"}}"#;
+        let r: TokenReviewResponse = serde_json::from_str(json).unwrap();
+        assert!(!r.status.authenticated);
+        assert_eq!(r.status.error.as_deref(), Some("invalid bearer token"));
     }
 
     #[test]

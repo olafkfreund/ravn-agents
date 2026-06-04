@@ -10,7 +10,7 @@
 
 use anyhow::Context;
 use kube::Client;
-use ravn_k8s::{config::Config, nats::Publisher, watcher};
+use ravn_k8s::{config::Config, publish::Publisher, watcher};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -31,8 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("building Kubernetes client (in-cluster or kubeconfig)")?;
 
-    let publisher = Publisher::connect(&config.nats_url, config.agent_id).await?;
-    tracing::info!("NATS connected");
+    let publisher = Publisher::connect(&config).await?;
 
     watcher::run(client, config.namespace, config.agent_id, config.host, publisher).await
 }

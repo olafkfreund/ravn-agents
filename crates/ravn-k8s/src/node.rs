@@ -22,7 +22,7 @@ use kube::{Api, Client};
 use ravn_core::{kube_severity_for_reason, AgentId, Event, KubeNodePayload, Message, Payload};
 use uuid::Uuid;
 
-use crate::nats::Publisher;
+use crate::publish::Publisher;
 
 /// Node conditions that signal trouble when their status is `True`. `Ready` is
 /// special-cased (it signals trouble when *not* `True`).

@@ -22,6 +22,14 @@ pub struct Config {
     /// the DaemonSet). `None` outside a node context; the node-agent restricts
     /// its watch to this node and records it as the event `host`.
     pub node_name: Option<String>,
+    /// Authenticated HTTP ingest URL (`RAVN_INGEST_URL`, e.g.
+    /// `https://ravn-control-plane/ingest`). When set, the agent publishes over
+    /// HTTP with its ServiceAccount token (#57) instead of to NATS.
+    pub ingest_url: Option<String>,
+    /// Path to the projected ServiceAccount token presented to the ingest
+    /// endpoint (`RAVN_SA_TOKEN_FILE`). Re-read per publish so token rotation
+    /// is picked up.
+    pub sa_token_file: String,
 }
 
 impl Config {
@@ -46,6 +54,12 @@ impl Config {
 
         let node_name = std::env::var("NODE_NAME").ok().filter(|s| !s.is_empty());
 
-        Ok(Self { nats_url, agent_id, host, namespace, node_name })
+        let ingest_url = std::env::var("RAVN_INGEST_URL").ok().filter(|s| !s.is_empty());
+        let sa_token_file = std::env::var("RAVN_SA_TOKEN_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/var/run/secrets/ravn/token".to_string());
+
+        Ok(Self { nats_url, agent_id, host, namespace, node_name, ingest_url, sa_token_file })
     }
 }

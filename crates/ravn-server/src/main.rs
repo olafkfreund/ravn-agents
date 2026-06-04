@@ -5,6 +5,7 @@
 //! persistence (#24), the agent registry (#25), and auth (#26) hang off this.
 
 mod api;
+mod auth;
 mod ca;
 mod config;
 mod db;
@@ -15,7 +16,8 @@ mod state;
 use anyhow::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::config::Config;
+use crate::auth::IngestAuth;
+use crate::config::{Config, IngestAuthConfig, JwksSource};
 use crate::state::AppState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +59,24 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Authenticated HTTP ingest (#57): load the cluster OIDC JWKS and build the
+    // ServiceAccount-token validator when configured.
+    let ingest_auth = match &config.ingest_auth {
+        Some(cfg) => {
+            let auth = build_ingest_auth(cfg).await.context("initializing ingest auth")?;
+            tracing::info!(
+                issuer = %cfg.issuer,
+                audience = %cfg.audience,
+                "authenticated HTTP ingest enabled (/ingest, ServiceAccount OIDC)"
+            );
+            Some(std::sync::Arc::new(auth))
+        }
+        None => {
+            tracing::info!("authenticated HTTP ingest disabled — set RAVN_INGEST_OIDC_ISSUER + JWKS");
+            None
+        }
+    };
+
     let app_state = AppState {
         pool,
         nats,
@@ -66,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         metrics: std::sync::Arc::new(metrics::Metrics::new()),
         ca,
         enroll_token,
+        ingest_auth,
     };
 
     // Spawn the ingestion loops (events + heartbeats).
@@ -84,6 +105,25 @@ async fn main() -> anyhow::Result<()> {
         .context("server error")?;
 
     Ok(())
+}
+
+/// Load the OIDC JWKS (from a URL or a file) and build the ingest-token
+/// validator. Fetched once at startup; rotating cluster signing keys requires
+/// a restart (acceptable for M0 — keys rotate on the order of months).
+async fn build_ingest_auth(cfg: &IngestAuthConfig) -> anyhow::Result<IngestAuth> {
+    let jwks_json = match &cfg.jwks_source {
+        JwksSource::Url(url) => reqwest::get(url)
+            .await
+            .with_context(|| format!("fetching JWKS from {url}"))?
+            .error_for_status()
+            .context("JWKS endpoint returned an error status")?
+            .text()
+            .await
+            .context("reading JWKS response body")?,
+        JwksSource::File(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading JWKS file {path}"))?,
+    };
+    IngestAuth::new(cfg.issuer.clone(), cfg.audience.clone(), &jwks_json)
 }
 
 /// Initialize structured logging. `RUST_LOG` wins; otherwise the configured

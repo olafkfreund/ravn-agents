@@ -22,6 +22,33 @@ pub struct Config {
     /// Agent enrollment config (#19). `Some` only when the bootstrap token and
     /// CA cert/key are all provided.
     pub enroll: Option<EnrollConfig>,
+    /// Authenticated HTTP ingest config (#57). `Some` enables `/ingest` with
+    /// ServiceAccount-token (OIDC/JWKS) validation.
+    pub ingest_auth: Option<IngestAuthConfig>,
+}
+
+/// Configuration for the authenticated HTTP ingest endpoint (#57).
+#[derive(Debug, Clone)]
+pub struct IngestAuthConfig {
+    /// Expected token issuer (the cluster's OIDC issuer).
+    /// `RAVN_INGEST_OIDC_ISSUER`.
+    pub issuer: String,
+    /// Expected audience on presented tokens. `RAVN_INGEST_AUDIENCE`,
+    /// default `ravn`.
+    pub audience: String,
+    /// Where to load the OIDC JWKS document from: a URL fetched at startup
+    /// (`RAVN_INGEST_OIDC_JWKS_URL`) or a local file
+    /// (`RAVN_INGEST_OIDC_JWKS_FILE`).
+    pub jwks_source: JwksSource,
+}
+
+/// Source of the OIDC JWKS document.
+#[derive(Debug, Clone)]
+pub enum JwksSource {
+    /// Fetch over HTTPS at startup.
+    Url(String),
+    /// Read from a local file (e.g. a mounted ConfigMap).
+    File(String),
 }
 
 /// Configuration for the bootstrap-token → mTLS enrollment endpoint (#19).
@@ -58,8 +85,46 @@ impl Config {
         let viewer_token = token("RAVN_VIEWER_TOKEN");
 
         let enroll = Self::enroll_from_env(&token)?;
+        let ingest_auth = Self::ingest_auth_from_env(&token)?;
 
-        Ok(Self { bind, log, database_url, nats_url, admin_token, viewer_token, enroll })
+        Ok(Self {
+            bind,
+            log,
+            database_url,
+            nats_url,
+            admin_token,
+            viewer_token,
+            enroll,
+            ingest_auth,
+        })
+    }
+
+    /// Assemble ingest-auth config. Enabled only when the issuer *and* a JWKS
+    /// source are set; an issuer with no JWKS source is a misconfiguration.
+    fn ingest_auth_from_env(
+        token: &impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Option<IngestAuthConfig>> {
+        let issuer = token("RAVN_INGEST_OIDC_ISSUER");
+        let jwks_source = match (token("RAVN_INGEST_OIDC_JWKS_URL"), token("RAVN_INGEST_OIDC_JWKS_FILE")) {
+            (Some(url), None) => Some(JwksSource::Url(url)),
+            (None, Some(path)) => Some(JwksSource::File(path)),
+            (Some(_), Some(_)) => {
+                anyhow::bail!("set only one of RAVN_INGEST_OIDC_JWKS_URL or RAVN_INGEST_OIDC_JWKS_FILE")
+            }
+            (None, None) => None,
+        };
+
+        match (issuer, jwks_source) {
+            (None, None) => Ok(None),
+            (Some(issuer), Some(jwks_source)) => {
+                let audience =
+                    token("RAVN_INGEST_AUDIENCE").unwrap_or_else(|| "ravn".to_string());
+                Ok(Some(IngestAuthConfig { issuer, audience, jwks_source }))
+            }
+            _ => anyhow::bail!(
+                "incomplete ingest-auth config: set RAVN_INGEST_OIDC_ISSUER and one of RAVN_INGEST_OIDC_JWKS_URL / RAVN_INGEST_OIDC_JWKS_FILE (or none)"
+            ),
+        }
     }
 
     /// Assemble enrollment config from the environment. Enrollment is enabled

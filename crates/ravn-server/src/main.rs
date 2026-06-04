@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let (user_auth, oidc_public) = match &config.oidc {
         Some(cfg) => {
             let ua = build_user_auth(cfg).await.context("initializing user OIDC auth")?;
-            let client_id = cfg.client_id.clone().unwrap_or_default();
+            let client_id = cfg.client_id.clone();
             tracing::info!(
                 issuer = %cfg.issuer,
                 admin_group = cfg.admin_group.as_deref().unwrap_or("<none>"),
@@ -164,7 +164,7 @@ async fn build_user_auth(cfg: &OidcConfig) -> anyhow::Result<UserAuth> {
     let jwks_json = load_jwks(&cfg.jwks_source).await?;
     UserAuth::new(
         cfg.issuer.clone(),
-        cfg.audience.clone(),
+        Some(cfg.audience.clone()),
         &jwks_json,
         cfg.groups_claim.clone(),
         cfg.admin_group.clone(),

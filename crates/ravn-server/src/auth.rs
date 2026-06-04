@@ -325,6 +325,18 @@ fv0uzdhEI+5TFOnO7jqhncO6
     }
 
     #[test]
+    fn user_token_for_another_audience_is_rejected() {
+        // Audience confusion guard (#100): a token minted for a different
+        // relying party at the same issuer must NOT authenticate here.
+        let exp = (chrono::Utc::now().timestamp() + 600) as usize;
+        let token = sign_value(&serde_json::json!({
+            "sub": "mallory", "iss": "https://idp.test", "aud": "some-other-app",
+            "exp": exp, "groups": ["ravn-admins"],
+        }));
+        assert!(user_auth(Some("ravn-admins"), None).authorize(&token).is_err());
+    }
+
+    #[test]
     fn space_separated_groups_claim_is_parsed() {
         let token = user_token(serde_json::json!("staff ravn-admins"));
         let role = user_auth(Some("ravn-admins"), None).authorize(&token).unwrap();

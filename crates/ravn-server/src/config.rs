@@ -40,11 +40,12 @@ pub struct OidcConfig {
     pub issuer: String,
     /// Where to load the IdP JWKS from. `RAVN_OIDC_JWKS_URL` / `_FILE`.
     pub jwks_source: JwksSource,
-    /// Expected token audience / OIDC client id. `RAVN_OIDC_AUDIENCE`.
-    pub audience: Option<String>,
+    /// Expected token audience / OIDC client id. `RAVN_OIDC_AUDIENCE`
+    /// (required when OIDC is enabled — audience validation is never skipped).
+    pub audience: String,
     /// Public client id the SPA uses for the auth-code+PKCE flow.
     /// `RAVN_OIDC_CLIENT_ID` (defaults to `audience`).
-    pub client_id: Option<String>,
+    pub client_id: String,
     /// Claim holding group memberships. `RAVN_OIDC_GROUPS_CLAIM`, default `groups`.
     pub groups_claim: String,
     /// Group granting admin. `RAVN_OIDC_ADMIN_GROUP`.
@@ -162,8 +163,14 @@ impl Config {
                 "RAVN_OIDC_ISSUER set but no JWKS source — set RAVN_OIDC_JWKS_URL or RAVN_OIDC_JWKS_FILE"
             ),
         };
-        let audience = token("RAVN_OIDC_AUDIENCE");
-        let client_id = token("RAVN_OIDC_CLIENT_ID").or_else(|| audience.clone());
+        // Audience is mandatory: skipping it would let a token minted for a
+        // different relying party at the same issuer authenticate here
+        // (audience confusion). Fail closed rather than silently disable it.
+        let audience = token("RAVN_OIDC_AUDIENCE").context(
+            "RAVN_OIDC_ISSUER is set but RAVN_OIDC_AUDIENCE is not — set the expected token \
+             audience (the OIDC client id); audience validation must not be skipped",
+        )?;
+        let client_id = token("RAVN_OIDC_CLIENT_ID").unwrap_or_else(|| audience.clone());
         let groups_claim = token("RAVN_OIDC_GROUPS_CLAIM").unwrap_or_else(|| "groups".to_string());
         let admin_group = token("RAVN_OIDC_ADMIN_GROUP");
         let viewer_group = token("RAVN_OIDC_VIEWER_GROUP");

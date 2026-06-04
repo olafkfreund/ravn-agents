@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use crate::auth::IngestAuth;
 use crate::ca::Ca;
 use crate::db::StoredEvent;
+use crate::inference::InferenceClient;
 use crate::metrics::Metrics;
 
 /// Cloneable handle to the control plane's runtime dependencies.
@@ -31,4 +32,7 @@ pub struct AppState {
     /// ServiceAccount-token validator for the authenticated HTTP ingest
     /// endpoint (#57). `None` disables `/ingest`.
     pub ingest_auth: Option<Arc<IngestAuth>>,
+    /// Shared inference client for async K8s-event explanations (#58). `None`
+    /// disables explanation generation.
+    pub inference: Option<Arc<InferenceClient>>,
 }

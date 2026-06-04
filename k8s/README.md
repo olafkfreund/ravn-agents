@@ -148,3 +148,30 @@ Verified live against this k3d cluster: a token minted with
 
 > **Follow-up:** the Kubernetes `TokenReview` *fallback* named in #57 is not yet
 > implemented — the OIDC/JWKS default path is. Tracked for a later pass.
+
+## Inference for K8s events (#58)
+
+K8s agents are detection-only — no per-pod/per-node model — so their events
+arrive without an explanation. The **control plane** fills that "last mile" in
+by calling a **shared, configurable, OpenAI-compatible inference endpoint**,
+**asynchronously and off the ingestion path**: the event persists immediately
+(the alert has fired), and an explanation is requested in the background and
+attached to the row when it returns. If the endpoint is slow or unreachable the
+event simply keeps its deterministic title — **safe failure**.
+
+Enable it on the server:
+
+| Server env var | Purpose | Default |
+| --- | --- | --- |
+| `RAVN_INFERENCE_ENDPOINT` | OpenAI-compatible base URL (enables explanations); `/chat/completions` is appended | — |
+| `RAVN_INFERENCE_MODEL` | Model name to request | `default` |
+| `RAVN_INFERENCE_API_KEY` / `_FILE` | Optional bearer key for the endpoint | — |
+| `RAVN_INFERENCE_TIMEOUT_SECS` | Per-request timeout | `30` |
+
+Only `kube_workload` / `kube_node` events without an existing explanation are
+enriched (host-agent events already carry their own). Outcomes are counted in
+`ravn_explanations_generated_total` / `ravn_explanation_errors_total`.
+
+Verified live: a bare `KubeWorkload` event ingested over NATS was explained via
+a mock endpoint and the explanation (text + `suggested_check` + model) appeared
+on the event in `/api/events` within ~2s.

@@ -63,6 +63,51 @@ pub async fn persist_message(state: &AppState, message: &Message) {
     state.metrics.events_ingested.with_label_values(&[&severity]).inc();
     // Fan out to live WebSocket subscribers (#29); ignored if none.
     let _ = state.events_tx.send(db::message_to_stored(message));
+
+    // K8s events arrive detection-only; enrich them with an explanation
+    // asynchronously, off this path (#58).
+    maybe_explain(state, message);
+}
+
+/// Spawn an async explanation for a bare K8s event when inference is
+/// configured. Off the detection path: a slow or failed call never blocks
+/// ingestion, and the event keeps its deterministic title.
+fn maybe_explain(state: &AppState, message: &Message) {
+    use ravn_core::Source;
+
+    let Some(inference) = state.inference.clone() else { return };
+    if message.explanation.is_some() {
+        return; // host-agent events already carry their own explanation
+    }
+    if !matches!(message.event.source(), Source::KubeWorkload | Source::KubeNode) {
+        return;
+    }
+
+    let event = message.event.clone();
+    let pool = state.pool.clone();
+    let events_tx = state.events_tx.clone();
+    let metrics = state.metrics.clone();
+
+    tokio::spawn(async move {
+        match inference.explain(&event).await {
+            Ok(explanation) => {
+                if let Err(error) =
+                    db::update_explanation(&pool, event.id, event.occurred_at, &explanation).await
+                {
+                    tracing::warn!(%error, event_id = %event.id, "failed to store explanation");
+                    return;
+                }
+                metrics.explanations_generated.inc();
+                // Re-broadcast the now-explained event to live subscribers.
+                let enriched = Message { event, explanation: Some(explanation) };
+                let _ = events_tx.send(db::message_to_stored(&enriched));
+            }
+            Err(error) => {
+                metrics.explanation_errors.inc();
+                tracing::warn!(%error, event_id = %event.id, "K8s event explanation failed");
+            }
+        }
+    });
 }
 
 /// Subscribe to heartbeats and refresh the agent registry (#20).

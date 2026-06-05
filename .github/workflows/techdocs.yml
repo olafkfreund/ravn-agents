@@ -1,0 +1,75 @@
+name: TechDocs
+
+# Build (and, when configured, publish) the Backstage TechDocs site whenever the
+# documentation changes. The sync step regenerates docs-techdocs/ symlinks first,
+# so a doc added under docs/ or plans/ flows into Backstage automatically — no
+# catalog edit required. See docs-techdocs/backstage.md for the publish setup.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - docs-techdocs/**
+      - plans/**
+      - "*.md"
+      - mkdocs.yml
+      - catalog-info.yaml
+      - portal/openapi.json
+      - scripts/techdocs-sync.sh
+      - .github/workflows/techdocs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - docs-techdocs/**
+      - plans/**
+      - "*.md"
+      - mkdocs.yml
+      - catalog-info.yaml
+      - portal/openapi.json
+      - scripts/techdocs-sync.sh
+      - .github/workflows/techdocs.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  techdocs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install TechDocs toolchain
+        run: |
+          python -m pip install --upgrade pip
+          pip install mkdocs-techdocs-core
+          npm install -g @techdocs/cli
+
+      - name: Sync docs sources (regenerate symlinks)
+        run: ./scripts/techdocs-sync.sh
+
+      - name: Generate (build + validate) TechDocs
+        run: npx @techdocs/cli generate --no-docker --source-dir . --output-dir ./site --verbose
+
+      - name: Publish to storage
+        if: github.ref == 'refs/heads/main' && vars.TECHDOCS_PUBLISH == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TECHDOCS_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TECHDOCS_AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.TECHDOCS_AWS_REGION }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.TECHDOCS_GCS_CREDENTIALS_FILE }}
+        run: |
+          npx @techdocs/cli publish \
+            --publisher-type "${{ vars.TECHDOCS_PUBLISHER_TYPE }}" \
+            --storage-name "${{ vars.TECHDOCS_STORAGE_NAME }}" \
+            --entity default/system/ravn \
+            --directory ./site

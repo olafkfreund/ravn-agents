@@ -1,0 +1,28 @@
+# MkDocs config for Backstage TechDocs.
+#
+# The published GitHub Pages site is a *Jekyll* site under docs/. TechDocs uses
+# MkDocs, which can't parse Jekyll's Liquid (index.md / showcase.md), so the
+# TechDocs source lives in its own docs_dir, `docs-techdocs/`, which holds an
+# authored landing page plus symlinks to the MkDocs-safe canonical files
+# (architecture, roadmap, contributing, security) and every design spec under
+# plans/. scripts/techdocs-sync.sh (re)creates those symlinks, and the TechDocs
+# CI workflow runs it before each build — so a new doc flows into Backstage
+# automatically.
+#
+# There is deliberately NO `nav:` — MkDocs auto-builds the navigation from the
+# file tree, so newly added docs appear without editing this file.
+site_name: Ravn
+site_description: >-
+  Small local-LLM agents that watch Linux/NixOS hosts and Kubernetes and report
+  in plain language, with a control plane, a portal, and supervised self-healing.
+docs_dir: docs-techdocs
+repo_url: https://github.com/olafkfreund/ravn-agents
+edit_uri: edit/main/docs-techdocs/
+
+plugins:
+  - techdocs-core
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true

@@ -23,13 +23,16 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Rust/Cargo sources, plus test fixture data files (#39) that
-        # cleanCargoSource would otherwise strip (it keeps only *.rs/Cargo.*).
+        # Rust/Cargo sources, plus data files cleanCargoSource would otherwise
+        # strip (it keeps only *.rs/Cargo.*): test fixtures (#39) and the SQLx
+        # migrations, which `sqlx::migrate!` embeds at build time (#24) — without
+        # them the control plane starts with no schema.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "ravn-source";
           filter = path: type:
             (pkgs.lib.hasInfix "/tests/fixtures/" path)
+            || (pkgs.lib.hasInfix "/migrations/" path)
             || (craneLib.filterCargoSources path type);
         };
 
@@ -117,6 +120,13 @@
           inherit ravn-agent ravn-server ravn-k8s ravn-actuator
             ravn-agent-image ravn-server-image ravn-k8s-image;
           default = ravn-server;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # End-to-end VM test of the self-healing loop (#121): inject a failed
+          # unit → propose → approve over the API → actuator heals → audited.
+          # Deliberately NOT in `checks`: NixOS VM tests are slow under emulation,
+          # so it runs in its own CI job (.github/workflows/vmtest.yml) rather than
+          # gating every PR via `nix flake check`.
+          remediation-e2e = import ./nixos/tests/remediation.nix { inherit self pkgs; };
         };
 
         checks = {

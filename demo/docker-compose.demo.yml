@@ -1,0 +1,60 @@
+# Demo overlay on top of docker-compose.yml. Bring up with:
+#   docker compose -f docker-compose.yml -f demo/docker-compose.demo.yml up -d --build
+#
+# Adds to the control plane: remediation templates, a fixed command-signing key,
+# and LLM explanations via a self-contained Ollama sidecar. Adds a systemd
+# `host-agent` that can actually self-heal.
+services:
+  # Self-contained Ollama so the demo needs no host Ollama (and works even when
+  # the host's is bound to loopback). CPU-only; pull the model after start with:
+  #   docker compose ... exec ollama ollama pull qwen3:1.7b   (scripts/demo-up.sh does this)
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama-demo:/root/.ollama
+    environment:
+      # The control plane (K8s events) and host-agent (host events) both call in
+      # concurrently, and the demo workloads are deliberately chatty — serve
+      # several requests at once and keep the model resident so explanations
+      # keep up instead of queueing behind a single stream.
+      OLLAMA_NUM_PARALLEL: "4"
+      OLLAMA_KEEP_ALIVE: "24h"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    # Not published on the host — only the in-network services reach it by name.
+
+  control-plane:
+    environment:
+      # Curated remediation templates (#115) + a fixed signing key so the
+      # host-agent's actuator can verify commands (its pubkey is baked in).
+      RAVN_TEMPLATES_DIR: /templates
+      RAVN_COMMAND_KEY: /etc/ravn/command.key
+      # Async LLM explanations for K8s events (#58) via the Ollama sidecar
+      # (OpenAI-compatible API). A small, fast model keeps explanations snappy
+      # (~3s); override with RAVN_DEMO_MODEL for a beefier one.
+      RAVN_INFERENCE_ENDPOINT: http://ollama:11434/v1
+      RAVN_INFERENCE_MODEL: ${RAVN_DEMO_MODEL:-qwen3:1.7b}
+      RAVN_INFERENCE_TIMEOUT_SECS: "60"
+    volumes:
+      - ./templates:/templates:ro
+      - ./demo/command.key:/etc/ravn/command.key:ro
+    depends_on:
+      - ollama
+
+  # A systemd "host" running ravnd + the privileged actuator + a flaky unit.
+  host-agent:
+    build:
+      context: .
+      dockerfile: demo/host-agent/Dockerfile
+    privileged: true
+    cgroup: host
+    tmpfs:
+      - /run
+      - /run/lock
+    stop_signal: SIGRTMIN+3
+    depends_on:
+      - nats
+      - control-plane
+      - ollama
+
+volumes:
+  ollama-demo:

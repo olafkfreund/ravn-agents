@@ -28,6 +28,10 @@ pub struct JournaldTap {
     pub min_priority: u8,
     /// Also classify auth/SSH/audit events (#12), regardless of priority.
     pub auth_enable: bool,
+    /// Skip raw kernel ring-buffer entries (`_TRANSPORT=kernel`). Useful when the
+    /// host shares a kernel with co-located containers (e.g. the all-in-one demo)
+    /// and their OOM/trace spam would otherwise drown out service events.
+    pub skip_kernel: bool,
 }
 
 impl JournaldTap {
@@ -96,6 +100,13 @@ impl JournaldTap {
             return None;
         }
 
+        // Drop raw kernel ring-buffer noise (OOM-killer dumps, stack traces) when
+        // asked — these aren't service health and flood the feed in shared-kernel
+        // setups.
+        if self.skip_kernel && field("_TRANSPORT") == Some("kernel") {
+            return None;
+        }
+
         let message = field("MESSAGE")?.to_string();
         let unit = field("_SYSTEMD_UNIT").map(str::to_string);
 
@@ -161,7 +172,7 @@ mod tests {
     use ravn_core::Source;
 
     fn tap() -> JournaldTap {
-        JournaldTap { agent_id: Uuid::now_v7(), host: "test".into(), min_priority: 4, auth_enable: false }
+        JournaldTap { agent_id: Uuid::now_v7(), host: "test".into(), min_priority: 4, auth_enable: false, skip_kernel: false }
     }
 
     fn record(pairs: &[(&str, &str)]) -> Map<String, Value> {
@@ -176,6 +187,30 @@ mod tests {
         assert_eq!(severity_from_priority(4), Severity::Warning);
         assert_eq!(severity_from_priority(5), Severity::Notice);
         assert_eq!(severity_from_priority(6), Severity::Info);
+    }
+
+    #[test]
+    fn skip_kernel_drops_kernel_transport_entries() {
+        let rec = record(&[
+            ("PRIORITY", "4"),
+            ("MESSAGE", "Memory cgroup out of memory: Killed process 123"),
+            ("_TRANSPORT", "kernel"),
+            ("__REALTIME_TIMESTAMP", "1717405200000000"),
+        ]);
+        // Default tap keeps it; a skip_kernel tap drops it.
+        assert!(tap().record_to_event(&rec).is_some());
+        let mut skipping = tap();
+        skipping.skip_kernel = true;
+        assert!(skipping.record_to_event(&rec).is_none());
+        // Non-kernel entries are unaffected even when skipping.
+        let svc = record(&[
+            ("PRIORITY", "4"),
+            ("MESSAGE", "flaky.service: Failed with result 'signal'."),
+            ("_TRANSPORT", "journal"),
+            ("_SYSTEMD_UNIT", "flaky.service"),
+            ("__REALTIME_TIMESTAMP", "1717405200000000"),
+        ]);
+        assert!(skipping.record_to_event(&svc).is_some());
     }
 
     #[test]

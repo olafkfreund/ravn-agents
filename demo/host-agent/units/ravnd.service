@@ -1,0 +1,39 @@
+[Unit]
+Description=Ravn agent (demo host)
+After=network-online.target ravn-actuator.service
+Wants=network-online.target
+
+[Service]
+Environment=RAVN_SERVER_URL=nats://nats:4222
+Environment=RAVN_HOST=demo-nixos-host
+Environment=RAVN_JOURNALD=1
+# The host shares its kernel with the co-located k3d cluster in this all-in-one
+# demo, so skip raw kernel ring-buffer noise (OOM dumps, stack traces) — keep the
+# feed to actual service/unit health.
+Environment=RAVN_JOURNALD_SKIP_KERNEL=1
+Environment=RAVN_AUTH=0
+Environment=RAVN_UPDATES=0
+Environment=RAVN_FAILED_UNITS=1
+# Local plain-language explanations for host events (failed units, journald) via
+# the demo's Ollama sidecar. The client appends /v1/chat/completions to this.
+Environment=RAVN_INFERENCE=1
+Environment=RAVN_INFERENCE_ENDPOINT=http://ollama:11434
+Environment=RAVN_INFERENCE_MODEL=qwen3:1.7b
+Environment=RAVN_INFERENCE_TIMEOUT_SECS=60
+# Self-healing: pull signed commands and relay to the actuator.
+Environment=RAVN_REMEDIATION=1
+Environment=RAVN_ACTUATOR_SOCKET=/run/ravn/actuator.sock
+Environment=RAVN_COMMAND_POLL_SECS=2
+Environment=RAVN_ENROLL_ENDPOINT=http://control-plane:8080
+Environment=RAVN_CRED_DIR=/var/lib/ravn-agent/creds
+Environment=RUST_LOG=info,ravnd::remediation=debug
+# Stage the pinned command key (enrollment is skipped in the demo) into the
+# writable cred dir, where ravnd also keeps its idempotency ledger.
+ExecStartPre=/bin/mkdir -p /var/lib/ravn-agent/creds
+ExecStartPre=/bin/cp /etc/ravn/command_pubkey.b64 /var/lib/ravn-agent/creds/command_pubkey.b64
+ExecStart=/usr/local/bin/ravnd
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

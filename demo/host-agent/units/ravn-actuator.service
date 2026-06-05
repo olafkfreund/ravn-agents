@@ -1,0 +1,16 @@
+[Unit]
+Description=Ravn privileged remediation actuator (demo)
+Before=ravnd.service
+
+[Service]
+# The pinned command public key (matches the control plane's signing key).
+EnvironmentFile=/etc/ravn/actuator.env
+Environment=RAVN_ACTUATOR_SOCKET=/run/ravn/actuator.sock
+RuntimeDirectory=ravn
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/ravn-actuator
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -27,6 +27,8 @@ pub struct Config {
     pub journald_enable: bool,
     /// Minimum syslog priority the journald tap emits (0=emerg … 7=debug).
     pub journald_min_priority: u8,
+    /// Skip raw kernel ring-buffer entries in the journald tap (`_TRANSPORT=kernel`).
+    pub journald_skip_kernel: bool,
     /// Whether the auth/SSH/audit classifier (#12) is enabled.
     pub auth_enable: bool,
     /// Paths watched for config drift (#11); empty disables the watcher.
@@ -206,6 +208,8 @@ impl Config {
             .unwrap_or(4) // warning and above
             .min(7);
 
+        let journald_skip_kernel = env_bool("RAVN_JOURNALD_SKIP_KERNEL").unwrap_or(false);
+
         let auth_enable = env_bool("RAVN_AUTH")
             .or(file.detection.auth.enable)
             .unwrap_or(true);
@@ -285,6 +289,7 @@ impl Config {
             log,
             journald_enable,
             journald_min_priority,
+            journald_skip_kernel,
             auth_enable,
             config_drift_paths,
             failed_units_enable,

@@ -39,6 +39,8 @@ mkdir -p "$DESIGN"
 # Top-level canonical files → docs-techdocs/<name>
 cp CONTRIBUTING.md "$DEST/contributing.md"
 cp SECURITY.md "$DEST/security.md"
+# The self-contained demo guide (incl. GPU/Ollama setup) → docs-techdocs/demo.md
+cp demo/README.md "$DEST/demo.md"
 
 # MkDocs-safe pages from the Jekyll docs/ tree.
 shopt -s nullglob

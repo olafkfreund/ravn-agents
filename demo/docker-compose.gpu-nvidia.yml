@@ -1,0 +1,21 @@
+# Optional GPU overlay: run the demo's Ollama on an NVIDIA GPU via CUDA. Layer it
+# on top of the demo overlay (scripts/demo-up.sh adds it automatically when
+# nvidia-smi is present, or force it with RAVN_DEMO_GPU=nvidia):
+#
+#   docker compose -f docker-compose.yml \
+#     -f demo/docker-compose.demo.yml \
+#     -f demo/docker-compose.gpu-nvidia.yml up -d
+#
+# Requires the host NVIDIA driver and the NVIDIA Container Toolkit
+# (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) so Docker
+# can hand the GPU to the container. The stock `ollama/ollama` image already
+# bundles CUDA — no special image tag needed.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]

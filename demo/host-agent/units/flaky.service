@@ -1,0 +1,11 @@
+[Unit]
+Description=Flaky demo service — kill it to trigger a remediation
+
+[Service]
+ExecStart=/bin/sleep infinity
+# Restart=no, so a SIGKILL leaves the unit `failed` (the failed-unit tap fires);
+# the actuator heals it back to `active` once you approve the remediation.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

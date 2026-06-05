@@ -1,0 +1,25 @@
+# Optional GPU overlay: run the demo's Ollama on an AMD GPU via ROCm instead of
+# CPU. Layer it on top of the demo overlay (scripts/demo-up.sh adds it
+# automatically when /dev/kfd is present):
+#
+#   docker compose -f docker-compose.yml \
+#     -f demo/docker-compose.demo.yml \
+#     -f demo/docker-compose.gpu-rocm.yml up -d
+#
+# Requires the host amdgpu/ROCm kernel driver and the /dev/kfd + /dev/dri
+# devices. The render/video group GIDs are host-specific — override with
+# RAVN_RENDER_GID / RAVN_VIDEO_GID if yours differ (find them with
+# `getent group render video`). HSA_OVERRIDE_GFX_VERSION matches the host's
+# ROCm setting (11.0.0 for RDNA3 / gfx1100-class cards).
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${RAVN_RENDER_GID:-303}"
+      - "${RAVN_VIDEO_GID:-26}"
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "${RAVN_HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
+      ROCR_VISIBLE_DEVICES: "${RAVN_ROCR_VISIBLE_DEVICES:-0}"

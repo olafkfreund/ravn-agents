@@ -131,6 +131,10 @@
           workspace-test = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
           });
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # End-to-end VM test of the self-healing loop (#121): inject a failed
+          # unit → propose → approve over the API → actuator heals → audited.
+          remediation-e2e = import ./nixos/tests/remediation.nix { inherit self pkgs; };
         };
 
         # Lightweight shell for CI / `nix develop`. Day-to-day dev uses devenv.

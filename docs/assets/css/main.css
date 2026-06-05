@@ -157,6 +157,19 @@ tr:nth-child(even) td { background: var(--bg-soft); }
 .page__title { margin-bottom: 1.25rem; }
 .page-content :first-child { margin-top: 0; }
 
+/* Content images (screenshots, the screencast GIF) must never overflow the
+   text column — they are captured at 2x, so cap them to the content width. */
+.page-content img,
+.post-content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.75rem auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px var(--shadow);
+}
+
 .post-meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 0.25rem; }
 .post-back { margin-top: 2.5rem; }
 .post-tags { margin: 0.5rem 0 0; display: flex; gap: 0.4rem; flex-wrap: wrap; }

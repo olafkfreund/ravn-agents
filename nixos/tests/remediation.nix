@@ -64,11 +64,22 @@ pkgs.testers.runNixOSTest {
       RAVN_TEMPLATES_DIR = "${self}/templates";
       RAVN_COMMAND_KEY = "/etc/ravn/command.key";
     };
-    # The agent reads its pinned command public key from a fixed cred dir.
-    systemd.services.ravnd.environment.RAVN_CRED_DIR = "/etc/ravn-creds";
-
     environment.etc."ravn/command.key".text = testPrivKey;
-    environment.etc."ravn-creds/command_pubkey.b64".text = testPubKey;
+
+    # ravnd reads its pinned command pubkey from its credential dir AND writes its
+    # idempotency ledger there, so that dir must be writable — its StateDirectory,
+    # not read-only /etc. Place the key via an ExecStartPre under the same
+    # DynamicUser before ravnd starts (enrollment, which would normally write it,
+    # is skipped in this test).
+    systemd.services.ravnd.serviceConfig.ExecStartPre =
+      let
+        placeKey = pkgs.writeShellScript "ravnd-place-pubkey" ''
+          set -eu
+          mkdir -p "$STATE_DIRECTORY/credentials"
+          printf '%s' '${testPubKey}' > "$STATE_DIRECTORY/credentials/command_pubkey.b64"
+        '';
+      in
+      "${placeKey}";
 
     # A unit that can be healed: runs forever, but Restart=no so a SIGKILL leaves
     # it `failed`; a restart brings it back to `active`.

@@ -2,8 +2,10 @@
 resolver = "2"
 members = [
   "crates/ravn-core",
+  "crates/ravn-crypto",
   "crates/ravn-agent",
   "crates/ravn-server",
+  "crates/ravn-actuator",
   "crates/ravn-eval",
   "crates/ravn-k8s",
 ]
@@ -16,6 +18,7 @@ repository = "https://github.com/olafkfreund/ravn-agents"
 
 [workspace.dependencies]
 ravn-core = { path = "crates/ravn-core" }
+ravn-crypto = { path = "crates/ravn-crypto" }
 ravn-agent = { path = "crates/ravn-agent" }
 
 # Shared across crates — pinned once here to avoid version drift.

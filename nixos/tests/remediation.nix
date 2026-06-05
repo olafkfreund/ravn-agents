@@ -20,18 +20,27 @@ in
 pkgs.testers.runNixOSTest {
   name = "ravn-remediation";
 
-  nodes.machine = { pkgs, ... }: {
+  nodes.machine = { pkgs, lib, ... }: {
     # Import the module implementations directly and pass the Ravn packages
     # explicitly — the nixosModules wrappers use an overlay, but the test
     # framework owns each node's `pkgs`, so we wire packages by option instead.
     imports = [ ../modules/agent.nix ../modules/control-plane.nix ];
 
     # Control plane: server + local Postgres + NATS. No auth, no enrollment.
+    # Use a TCP + trust Postgres so the server's sqlx URL is unambiguous (the
+    # module's default unix-socket URL form isn't accepted by this sqlx version).
     services.ravn.controlPlane = {
       enable = true;
       bind = "127.0.0.1:8080";
       package = self.packages.${pkgs.stdenv.hostPlatform.system}.ravn-server;
+      database.url = "postgres://ravn@127.0.0.1:5432/ravn";
     };
+    services.postgresql.enableTCPIP = true;
+    services.postgresql.authentication = lib.mkForce ''
+      local all all trust
+      host  all all 127.0.0.1/32 trust
+      host  all all ::1/128      trust
+    '';
 
     # Agent + actuator, remediation enabled, pointed at the local control plane.
     services.ravn.agent = {

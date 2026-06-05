@@ -1,0 +1,37 @@
+name: VM e2e
+
+# The self-healing remediation loop's end-to-end NixOS VM test (#121). It boots a
+# full stack (control plane + agent + privileged actuator) under QEMU, so it's
+# slow — kept out of the gating `nix flake check` and run here on its own.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - templates/**
+      - nixos/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/vmtest.yml
+  pull_request:
+    paths:
+      - crates/**
+      - templates/**
+      - nixos/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/vmtest.yml
+  workflow_dispatch: {}
+
+jobs:
+  remediation-e2e:
+    name: remediation e2e (NixOS VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build + run the remediation VM test
+        run: nix build .#remediation-e2e -L

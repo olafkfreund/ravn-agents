@@ -1,0 +1,98 @@
+# Demo workloads for the k3d cluster — a spread of healthy + failing pods so the
+# Ravn controller produces real signals (CrashLoopBackOff, OOMKilled,
+# ImagePullBackOff) that show up in the portal. All in the `ravn-demo` namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ravn-demo
+  labels:
+    app.kubernetes.io/part-of: ravn-demo
+---
+# 3 healthy baseline pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: ravn-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
+          # Cap workers — nginx defaults to one per CPU (`worker_processes auto`
+          # in nginx.conf), which on a many-core host spawns dozens of workers
+          # and OOMs against a small limit. Pin it to 2 before starting.
+          command: ["/bin/sh", "-c"]
+          args:
+            - sed -i 's/worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+---
+# 2 crashloopers → CrashLoopBackOff / BackOff signals.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: ravn-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: payments }
+  template:
+    metadata:
+      labels: { app: payments }
+    spec:
+      containers:
+        - name: payments
+          image: busybox:1.36
+          command: ["sh", "-c", "echo starting payments; sleep 5; echo 'FATAL: db connection refused'; exit 1"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+---
+# 1 OOM offender → OOMKilled (exit 137).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: ravn-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: cache }
+  template:
+    metadata:
+      labels: { app: cache }
+    spec:
+      containers:
+        - name: cache
+          image: busybox:1.36
+          # Allocate past the limit → OOMKilled.
+          command: ["sh", "-c", "echo filling memory; tail /dev/zero | head -c 100m | tr '\\0' 'x' >/dev/null; sleep 3600"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 24Mi }
+---
+# 1 bad image → ImagePullBackOff.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reporting
+  namespace: ravn-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: reporting }
+  template:
+    metadata:
+      labels: { app: reporting }
+    spec:
+      containers:
+        - name: reporting
+          image: ghcr.io/ravn-demo/does-not-exist:v9

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ReactFlow, Background, Controls, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -117,6 +117,17 @@ export function Topology() {
 
   const nodes = useMemo(() => buildNodes(data, { q, sev }), [data, q, sev]);
   const dimensions = data?.dimensions ?? [];
+
+  // First time we discover grouping dimensions, pick one so the fleet shows up
+  // pre-grouped instead of one flat blob. Prefer `kind` (the infra-shape
+  // dimension — host vs cluster) when present, else the first available.
+  const [autoGrouped, setAutoGrouped] = useState(false);
+  useEffect(() => {
+    if (!autoGrouped && !groupBy && dimensions.length > 0) {
+      setGroupBy(dimensions.includes("kind") ? "kind" : dimensions[0]);
+      setAutoGrouped(true);
+    }
+  }, [autoGrouped, groupBy, dimensions]);
   const toggleSev = (k: SeverityKey) =>
     setSev((prev) => {
       const next = new Set(prev);

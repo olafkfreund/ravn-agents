@@ -1,0 +1,144 @@
+# Ravn in-cluster agents for the demo, wired to the *compose* control plane over
+# NATS (the k3d cluster shares the `ravn-agents_default` docker network, so the
+# in-cluster pods reach `nats` by name — same trick as scripts/e2e-k8s.sh).
+#
+# Stable agent IDs (RAVN_CONTROLLER_ID / via NODE_NAME) keep the topology nodes
+# and their labels stable across re-deploys.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-controller
+  namespace: ravn-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-node-agent
+  namespace: ravn-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ravn-controller
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ravn-node-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ravn-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ravn-controller
+subjects:
+  - kind: ServiceAccount
+    name: ravn-controller
+    namespace: ravn-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ravn-node-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ravn-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: ravn-node-agent
+    namespace: ravn-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ravn-controller
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ravn
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: ravn-controller
+      containers:
+        - name: controller
+          image: ravn-k8s:demo
+          imagePullPolicy: IfNotPresent
+          command: ["ravn-controller"]
+          env:
+            - { name: NATS_URL, value: "nats://nats:4222" }
+            - { name: RAVN_CLUSTER, value: "k3d-demo" }
+            - { name: RAVN_CONTROLLER_ID, value: "01900000-0000-7000-8000-0000000000c1" }
+            - { name: RAVN_LOG, value: "info" }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ravn-node-agent
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+    app.kubernetes.io/component: node-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: node-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ravn
+        app.kubernetes.io/component: node-agent
+    spec:
+      serviceAccountName: ravn-node-agent
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-agent
+          image: ravn-k8s:demo
+          imagePullPolicy: IfNotPresent
+          command: ["ravn-node-agent"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - { name: NATS_URL, value: "nats://nats:4222" }
+            - { name: RAVN_CLUSTER, value: "k3d-demo" }
+            - { name: RAVN_CONTROLLER_ID, value: "01900000-0000-7000-8000-0000000000c2" }
+            - { name: RAVN_LOG, value: "info" }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 96Mi }

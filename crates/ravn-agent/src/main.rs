@@ -224,6 +224,7 @@ async fn run_detection(
             host: config.host.clone(),
             min_priority: config.journald_min_priority,
             auth_enable: config.auth_enable,
+            skip_kernel: config.journald_skip_kernel,
         };
         let tx = tx.clone();
         tokio::spawn(async move {

@@ -34,6 +34,20 @@ pnpm gen:api         # openapi-typescript openapi.json -> src/api/schema.d.ts
 pnpm build           # tsc --noEmit && vite build  ->  dist/
 ```
 
+## Showcase assets
+
+`pnpm capture` drives a running portal with Playwright and writes the showcase
+screenshots + a slideshow GIF to `docs/assets/img/`. Point it at a portal backed
+by data (seed a demo scenario first):
+
+```bash
+BASE_URL=http://localhost:5318 pnpm capture
+# NixOS: the bundled Chromium build may not match — pass a system Chrome:
+CHROMIUM_PATH=$(which google-chrome-stable) BASE_URL=... pnpm capture
+```
+
+The GIF is stitched from the stills with ImageMagick (`magick`) when present.
+
 ## Scope
 
 This is the M0 scaffold (#27): app shell, nav, theme toggle, and an Events

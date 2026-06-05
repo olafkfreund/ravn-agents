@@ -17,3 +17,6 @@ node_modules/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Backstage TechDocs build output
+/site/

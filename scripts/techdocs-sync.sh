@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Regenerate the TechDocs source symlinks in docs-techdocs/ from the canonical
-# docs. This is what keeps Backstage TechDocs automatic: any MkDocs-safe page
-# added to docs/ or any design spec added to plans/ is picked up on the next run
-# (the TechDocs CI workflow runs this before every build).
+# Regenerate the TechDocs source files in docs-techdocs/ from the canonical docs.
 #
-# Authored pages in docs-techdocs/ (index.md, backstage.md) are left untouched;
-# only the symlinks are managed. Jekyll-only / Liquid-templated pages
-# (index.md, showcase.md, blog.md, _posts, _layouts, _includes) are skipped
-# because MkDocs can't parse them.
+# These are REAL COPIES, not symlinks: Backstage's TechDocs reader downloads the
+# repo via its GitHub UrlReader, whose archive extraction does not reliably
+# preserve symlinks — committed symlinks make the built-in builder fail with a
+# "no docs directory" error. Copies are read identically everywhere.
+#
+# Freshness is enforced by the TechDocs CI workflow's drift check: if running
+# this script would change anything, the build fails with "run techdocs-sync".
+# So a doc added to docs/ or plans/ must be synced + committed, and it then
+# flows into Backstage automatically.
+#
+# Authored pages (index.md, backstage.md) are preserved; everything else under
+# docs-techdocs/ is generated. Jekyll-only / Liquid pages (index.md, showcase.md,
+# blog.md) are skipped because MkDocs can't parse them.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,7 +21,7 @@ cd "$(dirname "$0")/.."
 DEST="docs-techdocs"
 DESIGN="$DEST/design"
 
-# Pages in docs/ that are Jekyll-only or contain Liquid — never symlink these.
+# Pages in docs/ that are Jekyll-only or contain Liquid — never copy these.
 SKIP_DOCS=("index.md" "showcase.md" "blog.md")
 
 is_skipped() {
@@ -24,21 +30,22 @@ is_skipped() {
   return 1
 }
 
-# Clear out previously generated symlinks (leave real authored files in place).
-find "$DEST" -maxdepth 1 -type l -delete
+# Remove previously generated copies AND any legacy symlinks (keep the authored
+# pages and this dir).
+find "$DEST" -maxdepth 1 \( -type f -o -type l \) ! -name index.md ! -name backstage.md -delete
 rm -rf "$DESIGN"
 mkdir -p "$DESIGN"
 
 # Top-level canonical files → docs-techdocs/<name>
-ln -s ../CONTRIBUTING.md "$DEST/contributing.md"
-ln -s ../SECURITY.md "$DEST/security.md"
+cp CONTRIBUTING.md "$DEST/contributing.md"
+cp SECURITY.md "$DEST/security.md"
 
 # MkDocs-safe pages from the Jekyll docs/ tree.
 shopt -s nullglob
 for f in docs/*.md; do
   name="$(basename "$f")"
   is_skipped "$name" && continue
-  ln -s "../docs/$name" "$DEST/$name"
+  cp "$f" "$DEST/$name"
 done
 
 # Every design spec under plans/ → docs-techdocs/design/<name>, plus a generated
@@ -52,10 +59,10 @@ done
 } >"$DESIGN/index.md"
 for f in plans/*.md; do
   name="$(basename "$f")"
-  ln -s "../../plans/$name" "$DESIGN/$name"
+  cp "$f" "$DESIGN/$name"
   title="$(grep -m1 '^# ' "$f" | sed 's/^#\s*//')"
   [[ -z "$title" ]] && title="$name"
   echo "- [$title]($name)" >>"$DESIGN/index.md"
 done
 
-echo "techdocs-sync: linked $(find "$DEST" -type l | wc -l | tr -d ' ') source files into $DEST/"
+echo "techdocs-sync: copied $(find "$DEST" -type f ! -name index.md ! -name backstage.md | wc -l | tr -d ' ') generated files into $DEST/"

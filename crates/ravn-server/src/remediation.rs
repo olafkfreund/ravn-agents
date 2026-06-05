@@ -137,6 +137,17 @@ pub fn build_command(
         .map(|c| c.resolve(&proposal.params))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("resolving steps: {e}"))?;
+    let preconditions = template
+        .preconditions
+        .iter()
+        .map(|c| {
+            Ok(ravn_core::Condition {
+                check: c.check.resolve(&proposal.params)?,
+                equals: c.equals.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ravn_core::RenderError>>()
+        .map_err(|e| anyhow::anyhow!("resolving preconditions: {e}"))?;
     let verify = match &template.verify {
         Some(v) => Some(ravn_core::Verify {
             check: v.check.resolve(&proposal.params).map_err(|e| anyhow::anyhow!("resolving verify: {e}"))?,
@@ -152,8 +163,10 @@ pub fn build_command(
         template_id: template.id.clone(),
         template_version: template.version,
         risk_tier: template.risk_tier,
+        preconditions,
         steps,
         verify,
+        rollback: template.rollback,
         approval_ref: approval,
         nonce: Uuid::now_v7().to_string(),
         issued_at: now,

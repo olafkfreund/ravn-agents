@@ -19,8 +19,10 @@ const RISK: Record<RiskTier, { label: string; cls: string }> = {
 
 const STATUS: Record<ActionStatus, { label: string; cls: string }> = {
   succeeded: { label: "succeeded", cls: "text-sev-notice" },
+  precondition_failed: { label: "precondition failed", cls: "text-sev-warning" },
   failed: { label: "failed", cls: "text-sev-error" },
   rejected: { label: "rejected", cls: "text-sev-warning" },
+  frozen: { label: "frozen", cls: "text-sev-critical" },
 };
 
 function isPending(r: RemediationRecord): boolean {

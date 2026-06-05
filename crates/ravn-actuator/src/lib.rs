@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use chrono::Utc;
-use ravn_core::{ActionResult, ActionStatus, Capability, CommandEnvelope};
+use ravn_core::{ActionResult, ActionStatus, Capability, CommandEnvelope, Rollback};
 use ravn_crypto::{verify_envelope, VerifyingKey};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -49,18 +49,20 @@ pub fn is_valid_unit(unit: &str) -> bool {
         && unit.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':' | '\\'))
 }
 
-/// The unit a capability targets, if any (all P1 capabilities target a unit).
-fn capability_unit(cap: &Capability) -> &str {
+/// The unit a capability targets, if any. `nix_rollback` targets no unit.
+fn capability_unit(cap: &Capability) -> Option<&str> {
     match cap {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
-        | Capability::UnitState { unit } => unit,
+        | Capability::UnitState { unit } => Some(unit),
+        Capability::NixRollback => None,
     }
 }
 
-/// Handle one command end-to-end: verify the envelope, validate inputs, run the
-/// steps in order, then evaluate the verify post-condition. Pure with respect to
-/// the injected [`CapabilityExecutor`], so it is fully unit-testable.
+/// Handle one command end-to-end: verify the envelope, validate inputs, check the
+/// preconditions, run the steps in order, evaluate the verify post-condition, and
+/// — if verify fails — perform the declared rollback. Pure with respect to the
+/// injected [`CapabilityExecutor`], so it is fully unit-testable.
 pub fn handle_command(
     executor: &dyn CapabilityExecutor,
     key: &VerifyingKey,
@@ -73,63 +75,112 @@ pub fn handle_command(
         observed_state: None,
         finished_at: Utc::now(),
     };
-    let fail = |detail: String, observed: Option<String>| ActionResult {
-        command_id: env.command_id,
-        status: ActionStatus::Failed,
-        detail: Some(detail),
-        observed_state: observed,
-        finished_at: Utc::now(),
+    let result = |status: ActionStatus, detail: Option<String>, observed: Option<String>| {
+        ActionResult { command_id: env.command_id, status, detail, observed_state: observed, finished_at: Utc::now() }
     };
+    let fail = |detail: String, observed: Option<String>| result(ActionStatus::Failed, Some(detail), observed);
 
     // 1. Independent signature + expiry verification.
     if let Err(e) = verify_envelope(key, env, Utc::now()) {
         return reject(e.to_string());
     }
 
-    // 2. Validate every targeted unit before doing anything.
-    for cap in env.steps.iter().chain(env.verify.as_ref().map(|v| &v.check)) {
-        let unit = capability_unit(cap);
-        if !is_valid_unit(unit) {
-            return reject(format!("invalid unit name: {unit:?}"));
+    // 2. Validate every targeted unit before doing anything (preconditions,
+    //    steps, and the verify check). `nix_rollback` targets no unit.
+    let precondition_checks = env.preconditions.iter().map(|c| &c.check);
+    let verify_check = env.verify.as_ref().map(|v| &v.check);
+    for cap in precondition_checks.chain(env.steps.iter()).chain(verify_check) {
+        if let Some(unit) = capability_unit(cap) {
+            if !is_valid_unit(unit) {
+                return reject(format!("invalid unit name: {unit:?}"));
+            }
         }
     }
 
-    // 3. Run the steps in order.
+    // 3. Check preconditions BEFORE running any step; a failed precondition
+    //    means the world is not in the expected state, so we do nothing (#117).
+    for cond in &env.preconditions {
+        match executor.run(&cond.check) {
+            Ok(observed) => {
+                let observed = observed.unwrap_or_default();
+                if observed != cond.equals {
+                    return result(
+                        ActionStatus::PreconditionFailed,
+                        Some(format!(
+                            "precondition failed: expected {:?}, observed {:?}",
+                            cond.equals, observed
+                        )),
+                        Some(observed),
+                    );
+                }
+            }
+            Err(e) => return fail(format!("precondition check errored: {e}"), None),
+        }
+    }
+
+    // 4. Run the steps in order.
     for step in &env.steps {
         if let Err(e) = executor.run(step) {
             return fail(format!("step failed: {e}"), None);
         }
     }
 
-    // 4. Verify post-condition, if declared.
+    // 5. Verify post-condition, if declared. On failure, perform the declared
+    //    rollback before reporting (#117).
     if let Some(verify) = &env.verify {
         match executor.run(&verify.check) {
             Ok(observed) => {
                 let observed = observed.unwrap_or_default();
                 if observed != verify.equals {
-                    return fail(
-                        format!("verify failed: expected {:?}, observed {:?}", verify.equals, observed),
-                        Some(observed),
+                    let detail = format!(
+                        "verify failed: expected {:?}, observed {:?}",
+                        verify.equals, observed
                     );
+                    return perform_rollback(executor, env, detail, observed);
                 }
-                return ActionResult {
-                    command_id: env.command_id,
-                    status: ActionStatus::Succeeded,
-                    detail: None,
-                    observed_state: Some(observed),
-                    finished_at: Utc::now(),
-                };
+                return result(ActionStatus::Succeeded, None, Some(observed));
             }
-            Err(e) => return fail(format!("verify check errored: {e}"), None),
+            Err(e) => {
+                let detail = format!("verify check errored: {e}");
+                return perform_rollback(executor, env, detail, String::new());
+            }
         }
     }
 
-    ActionResult {
+    result(ActionStatus::Succeeded, None, None)
+}
+
+/// Verification has failed; perform the envelope's declared rollback. If there is
+/// no rollback the outcome is plain [`ActionStatus::Failed`]; if a rollback runs
+/// but itself fails, the target is left in an unknown state and we return
+/// [`ActionStatus::Frozen`] so upstream stops auto-acting on it (#117).
+fn perform_rollback(
+    executor: &dyn CapabilityExecutor,
+    env: &CommandEnvelope,
+    verify_detail: String,
+    observed: String,
+) -> ActionResult {
+    let observed = (!observed.is_empty()).then_some(observed);
+    let finished = |status: ActionStatus, detail: String| ActionResult {
         command_id: env.command_id,
-        status: ActionStatus::Succeeded,
-        detail: None,
-        observed_state: None,
+        status,
+        detail: Some(detail),
+        observed_state: observed.clone(),
         finished_at: Utc::now(),
+    };
+
+    match env.rollback {
+        Rollback::None => finished(ActionStatus::Failed, verify_detail),
+        Rollback::NixGeneration => match executor.run(&Capability::NixRollback) {
+            Ok(_) => finished(
+                ActionStatus::Failed,
+                format!("{verify_detail}; rolled back to the previous NixOS generation"),
+            ),
+            Err(e) => finished(
+                ActionStatus::Frozen,
+                format!("{verify_detail}; rollback FAILED ({e}) — target frozen, escalate to a human"),
+            ),
+        },
     }
 }
 
@@ -157,6 +208,20 @@ impl CapabilityExecutor for SystemctlExecutor {
                     .output()
                     .map_err(|e| ExecError(format!("spawning systemctl: {e}")))?;
                 Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+            }
+            // Roll the system back to its previous NixOS generation, then activate
+            // it — the universal safety net. Two direct-argv steps, no shell. Not
+            // hermetically unit-testable (needs a real NixOS host); the rollback
+            // *logic* in `handle_command` is covered via the MockExecutor.
+            Capability::NixRollback => {
+                const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
+                run_ok(Command::new("nix-env").arg("--rollback").arg("-p").arg(SYSTEM_PROFILE))?;
+                run_ok(Command::new(concat!(
+                    "/nix/var/nix/profiles/system",
+                    "/bin/switch-to-configuration"
+                ))
+                .arg("switch"))?;
+                Ok(None)
             }
         }
     }
@@ -243,7 +308,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use ravn_core::{AgentId, ApprovalRef, RiskTier, Verify};
+    use ravn_core::{AgentId, ApprovalRef, Condition, RiskTier, Rollback, Verify};
     use ravn_crypto::{generate_signing_key, sign_envelope, SigningKey};
     use uuid::Uuid;
 
@@ -252,11 +317,17 @@ mod tests {
         ran: Mutex<Vec<Capability>>,
         unit_state: String,
         fail_on_restart: bool,
+        fail_on_rollback: bool,
     }
 
     impl MockExecutor {
         fn new(unit_state: &str) -> Self {
-            Self { ran: Mutex::new(vec![]), unit_state: unit_state.into(), fail_on_restart: false }
+            Self {
+                ran: Mutex::new(vec![]),
+                unit_state: unit_state.into(),
+                fail_on_restart: false,
+                fail_on_rollback: false,
+            }
         }
     }
 
@@ -267,13 +338,34 @@ mod tests {
                 Capability::RestartUnit { .. } if self.fail_on_restart => {
                     Err(ExecError("unit refused to start".into()))
                 }
+                Capability::NixRollback if self.fail_on_rollback => {
+                    Err(ExecError("switch-to-configuration failed".into()))
+                }
                 Capability::UnitState { .. } => Ok(Some(self.unit_state.clone())),
                 _ => Ok(None),
             }
         }
     }
 
+    /// A signed `reset_failed` + `restart_unit` envelope, optionally with a verify
+    /// post-condition, a precondition, and a declared rollback.
+    struct EnvelopeOpts<'a> {
+        verify_equals: Option<&'a str>,
+        precondition_equals: Option<&'a str>,
+        rollback: Rollback,
+    }
+
+    impl Default for EnvelopeOpts<'_> {
+        fn default() -> Self {
+            Self { verify_equals: None, precondition_equals: None, rollback: Rollback::None }
+        }
+    }
+
     fn signed_restart_envelope(key: &SigningKey, verify_equals: Option<&str>) -> CommandEnvelope {
+        signed_envelope(key, EnvelopeOpts { verify_equals, ..Default::default() })
+    }
+
+    fn signed_envelope(key: &SigningKey, opts: EnvelopeOpts<'_>) -> CommandEnvelope {
         let now = Utc::now();
         let mut env = CommandEnvelope {
             command_id: Uuid::now_v7(),
@@ -281,15 +373,25 @@ mod tests {
             template_id: "failed-unit-restart".into(),
             template_version: 3,
             risk_tier: RiskTier::Safe,
+            preconditions: opts
+                .precondition_equals
+                .map(|eq| {
+                    vec![Condition {
+                        check: Capability::UnitState { unit: "nginx.service".into() },
+                        equals: eq.into(),
+                    }]
+                })
+                .unwrap_or_default(),
             steps: vec![
                 Capability::ResetFailed { unit: "nginx.service".into() },
                 Capability::RestartUnit { unit: "nginx.service".into() },
             ],
-            verify: verify_equals.map(|eq| Verify {
+            verify: opts.verify_equals.map(|eq| Verify {
                 check: Capability::UnitState { unit: "nginx.service".into() },
                 equals: eq.into(),
                 timeout_s: 30,
             }),
+            rollback: opts.rollback,
             approval_ref: ApprovalRef::PolicyAuto,
             nonce: "n1".into(),
             issued_at: now,
@@ -356,8 +458,10 @@ mod tests {
             template_id: "t".into(),
             template_version: 1,
             risk_tier: RiskTier::Safe,
+            preconditions: vec![],
             steps: vec![Capability::RestartUnit { unit: "nginx.service; rm -rf /".into() }],
             verify: None,
+            rollback: Rollback::None,
             approval_ref: ApprovalRef::PolicyAuto,
             nonce: "n".into(),
             issued_at: now,
@@ -378,5 +482,95 @@ mod tests {
         assert!(!is_valid_unit("nginx.service rm -rf"));
         assert!(!is_valid_unit("a/b.service"));
         assert!(!is_valid_unit(""));
+    }
+
+    #[test]
+    fn failed_precondition_skips_all_steps() {
+        let key = generate_signing_key();
+        // Precondition demands "failed", but the unit is already "active": the
+        // remediation is unnecessary, so nothing should run.
+        let env = signed_envelope(
+            &key,
+            EnvelopeOpts { precondition_equals: Some("failed"), ..Default::default() },
+        );
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        assert_eq!(result.status, ActionStatus::PreconditionFailed);
+        assert_eq!(result.observed_state.as_deref(), Some("active"));
+        let ran = exec.ran.lock().unwrap();
+        // Only the precondition check ran — no reset_failed/restart.
+        assert_eq!(ran.len(), 1);
+        assert!(matches!(ran[0], Capability::UnitState { .. }));
+    }
+
+    #[test]
+    fn met_precondition_runs_steps() {
+        let key = generate_signing_key();
+        let env = signed_envelope(
+            &key,
+            EnvelopeOpts {
+                precondition_equals: Some("failed"),
+                verify_equals: Some("active"),
+                ..Default::default()
+            },
+        );
+        let exec = MockExecutor::new("failed"); // precondition holds; verify will see this too
+        // Precondition sees "failed" (holds). After restart, verify also reads the
+        // mock's fixed state "failed", so verify fails — but the precondition phase
+        // itself must have let the steps run.
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let ran = exec.ran.lock().unwrap();
+        assert!(ran.iter().any(|c| matches!(c, Capability::RestartUnit { .. })));
+        assert_ne!(result.status, ActionStatus::PreconditionFailed);
+    }
+
+    #[test]
+    fn verify_failure_triggers_nix_rollback() {
+        let key = generate_signing_key();
+        let env = signed_envelope(
+            &key,
+            EnvelopeOpts {
+                verify_equals: Some("active"),
+                rollback: Rollback::NixGeneration,
+                ..Default::default()
+            },
+        );
+        let exec = MockExecutor::new("failed"); // unit never recovers → verify fails
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        // Rollback ran and succeeded, so the outcome is Failed (not Frozen).
+        assert_eq!(result.status, ActionStatus::Failed);
+        let ran = exec.ran.lock().unwrap();
+        assert!(ran.iter().any(|c| matches!(c, Capability::NixRollback)));
+        assert!(result.detail.as_deref().unwrap().contains("rolled back"));
+    }
+
+    #[test]
+    fn rollback_failure_freezes_the_target() {
+        let key = generate_signing_key();
+        let env = signed_envelope(
+            &key,
+            EnvelopeOpts {
+                verify_equals: Some("active"),
+                rollback: Rollback::NixGeneration,
+                ..Default::default()
+            },
+        );
+        let mut exec = MockExecutor::new("failed"); // verify fails
+        exec.fail_on_rollback = true; // and the rollback itself fails
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        assert_eq!(result.status, ActionStatus::Frozen);
+        assert!(result.detail.as_deref().unwrap().contains("frozen"));
+    }
+
+    #[test]
+    fn verify_failure_without_rollback_is_plain_failed() {
+        let key = generate_signing_key();
+        // Default rollback is None.
+        let env = signed_restart_envelope(&key, Some("active"));
+        let exec = MockExecutor::new("failed");
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        assert_eq!(result.status, ActionStatus::Failed);
+        let ran = exec.ran.lock().unwrap();
+        assert!(!ran.iter().any(|c| matches!(c, Capability::NixRollback)));
     }
 }

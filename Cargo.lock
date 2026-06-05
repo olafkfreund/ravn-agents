@@ -2436,6 +2436,7 @@ dependencies = [
  "hex",
  "notify",
  "ravn-core",
+ "ravn-crypto",
  "rcgen",
  "reqwest",
  "rusqlite",

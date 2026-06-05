@@ -71,6 +71,16 @@ pub struct Config {
     pub bootstrap_token: Option<String>,
     /// Directory holding the agent's mTLS credentials (key/cert/ca).
     pub cred_dir: PathBuf,
+    /// Whether to pull and execute remediation commands (#114). Opt-in
+    /// (default off) — a host only self-heals when explicitly enabled.
+    pub remediation_enable: bool,
+    /// Path to the privileged actuator's Unix socket (#113).
+    pub actuator_socket: PathBuf,
+    /// How often (seconds) to poll the control plane for commands.
+    pub command_poll_secs: u64,
+    /// Bearer token presented on the command endpoints (P1 placeholder until
+    /// per-agent transport auth, #26). `None` sends unauthenticated.
+    pub api_token: Option<String>,
 }
 
 /// Subset of the TOML config file the daemon currently reads.
@@ -310,6 +320,15 @@ impl Config {
                 .or_else(|| env_var("STATE_DIRECTORY").map(|d| format!("{d}/credentials")))
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("ravn-credentials")),
+            remediation_enable: env_bool("RAVN_REMEDIATION").unwrap_or(false),
+            actuator_socket: env_var("RAVN_ACTUATOR_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/run/ravn/actuator.sock")),
+            command_poll_secs: env_var("RAVN_COMMAND_POLL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10)
+                .max(1),
+            api_token: env_var("RAVN_API_TOKEN"),
         })
     }
 }

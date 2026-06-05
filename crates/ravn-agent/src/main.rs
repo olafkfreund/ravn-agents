@@ -10,6 +10,7 @@ mod buffer;
 mod config;
 mod detection;
 mod enrollment;
+mod remediation;
 mod transport;
 
 use ravn_agent::inference;
@@ -104,6 +105,13 @@ async fn main() -> anyhow::Result<()> {
     // Heartbeat task: keeps the control plane's liveness fresh even when quiet.
     spawn_heartbeat(&config, transport.clone(), health.clone());
 
+    // Remediation command pull (#114): opt-in. Pull signed commands over the
+    // existing outbound HTTP path, verify against the pinned key, and relay to
+    // the privileged actuator. ravnd never executes a capability itself.
+    if config.remediation_enable {
+        spawn_remediation(&config);
+    }
+
     // Flush task: drain the offline buffer to the control plane.
     if let Some(b) = &buffer {
         spawn_flush(transport.clone(), b.clone());
@@ -148,6 +156,33 @@ fn spawn_heartbeat(config: &Config, transport: Arc<Transport>, health: Health) {
             }
         }
     });
+}
+
+/// Spawn the remediation command-pull loop (#114) when a pinned key and an HTTP
+/// control-plane endpoint are available; otherwise log why it stays off.
+fn spawn_remediation(config: &Config) {
+    let Some(key) = remediation::load_pinned_key(&config.cred_dir) else {
+        tracing::warn!("remediation enabled but no pinned command key (enroll first); pull disabled");
+        return;
+    };
+    let Some(base) = config.enroll_endpoint.clone() else {
+        tracing::warn!(
+            "remediation enabled but RAVN_ENROLL_ENDPOINT (HTTP control plane) is unset; pull disabled"
+        );
+        return;
+    };
+    let ledger = Arc::new(remediation::Ledger::load(config.cred_dir.join("command-ledger")));
+    tracing::info!(socket = %config.actuator_socket.display(), "remediation command pull enabled");
+    tokio::spawn(remediation::run(
+        reqwest::Client::new(),
+        base,
+        config.agent_id,
+        config.api_token.clone(),
+        key,
+        ledger,
+        config.actuator_socket.clone(),
+        config.command_poll_secs,
+    ));
 }
 
 /// Periodically drain the offline buffer to the control plane.

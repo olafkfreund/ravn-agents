@@ -48,6 +48,9 @@ export function Remediations() {
     queryKey: ["remediations"],
     queryFn: listRemediations,
     refetchInterval: 5_000,
+    // Fail fast: surface the actionable error instead of spinning through the
+    // default 3 retries when the control plane is old/unreachable.
+    retry: 1,
   });
 
   const isAdmin = roleQ.data === "admin";

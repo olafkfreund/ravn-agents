@@ -166,17 +166,26 @@ export function remediationErrorMessage(error: unknown): string {
   }
 }
 
+/** How long to wait for the control plane before giving up (ms). Bounds a hung
+ *  request so the UI shows the actionable error instead of spinning forever. */
+const REMEDIATION_TIMEOUT_MS = 8000;
+
 /** Fetch a remediation endpoint with the bearer token, raising a typed
- *  RemediationError that distinguishes network / 401-403 / 404 / 5xx failures. */
+ *  RemediationError that distinguishes network / timeout / 401-403 / 404 / 5xx. */
 async function remediationFetch(input: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REMEDIATION_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(input, { ...init, headers });
+    res = await fetch(input, { ...init, headers, signal: controller.signal });
   } catch {
-    throw new RemediationError("unreachable", "control plane unreachable");
+    // Network failure or our timeout abort — either way, unreachable.
+    throw new RemediationError("unreachable", "control plane unreachable or timed out");
+  } finally {
+    clearTimeout(timer);
   }
   if (res.status === 401 || res.status === 403) {
     if (res.status === 401) clearToken();

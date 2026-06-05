@@ -12,6 +12,7 @@ mod config;
 mod db;
 mod inference;
 mod ingest;
+mod knowledge;
 mod metrics;
 mod policy;
 mod remediation;
@@ -152,6 +153,13 @@ async fn main() -> anyhow::Result<()> {
     );
     let remediations = std::sync::Arc::new(remediation::RemediationStore::default());
 
+    // Remediation knowledge base (#118): per-env markdown wiki for deterministic
+    // recall + gap tracking. Disabled (no-op) when RAVN_KB_DIR is unset.
+    let knowledge = std::sync::Arc::new(
+        knowledge::KnowledgeBase::open(config.kb_dir.as_deref())
+            .context("opening the remediation knowledge base")?,
+    );
+
     // Remediation policy engine (#116): the per-env default-deny policy plus the
     // global auto kill switch and the circuit breaker. With no policy file and
     // the kill switch off (the defaults), every match requires approval (P1).
@@ -197,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         command_queue,
         templates,
         remediations,
+        knowledge,
         policy,
         command_ttl_secs: config.command_ttl_secs,
     };

@@ -45,6 +45,10 @@ pub struct Config {
     /// How long (seconds) a signed command stays valid. `RAVN_COMMAND_TTL_SECS`,
     /// default 300.
     pub command_ttl_secs: i64,
+    /// Directory for the remediation knowledge base (#118). `RAVN_KB_DIR`. When
+    /// unset the KB is disabled (no retrospective writing, recall, or gap
+    /// tracking) — P1 behaviour is unchanged.
+    pub kb_dir: Option<String>,
     /// Remediation policy engine settings (#116): the per-env policy file plus
     /// the global auto kill switch and circuit-breaker limits.
     pub policy: PolicyConfig,
@@ -193,6 +197,7 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300)
             .max(1);
+        let kb_dir = token("RAVN_KB_DIR");
 
         let policy = PolicyConfig {
             file: token("RAVN_POLICY_FILE"),
@@ -228,6 +233,7 @@ impl Config {
             command_key_path,
             templates_dir,
             command_ttl_secs,
+            kb_dir,
             policy,
         })
     }

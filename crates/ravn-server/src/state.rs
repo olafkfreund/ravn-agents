@@ -10,6 +10,7 @@ use crate::ca::Ca;
 use crate::command::{CommandQueue, CommandSigner};
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
+use crate::knowledge::KnowledgeBase;
 use crate::metrics::Metrics;
 use crate::policy::PolicyEngine;
 use crate::remediation::{RemediationStore, TemplateRegistry};
@@ -64,6 +65,10 @@ pub struct AppState {
     pub templates: Arc<TemplateRegistry>,
     /// In-memory remediation records: proposals, decisions, results (#115).
     pub remediations: Arc<RemediationStore>,
+    /// Per-environment remediation knowledge base (#118): deterministic
+    /// retrospective writing, recall, and gap tracking. Disabled when
+    /// `RAVN_KB_DIR` is unset.
+    pub knowledge: Arc<KnowledgeBase>,
     /// Declarative default-deny policy engine: decides auto vs. approve vs.
     /// forbid, with the circuit breaker and kill switch (#116).
     pub policy: Arc<PolicyEngine>,

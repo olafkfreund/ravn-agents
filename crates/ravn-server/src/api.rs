@@ -338,7 +338,30 @@ async fn post_command_result(
 ) -> StatusCode {
     tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
     // Close the matching remediation record (#115), and keep the raw result.
-    state.remediations.record_result(result.clone());
+    if let Some((record, signature)) = state.remediations.record_result(result.clone()) {
+        // Reflect the outcome into the knowledge base (#118): create or update
+        // the per-fault entry so future occurrences recall this resolution.
+        if state.knowledge.is_enabled() && !signature.is_empty() {
+            let approver = match &record.decision {
+                ravn_core::Decision::Approved { by } => match by {
+                    ravn_core::ApprovalRef::Human { user, .. } => user.clone(),
+                    ravn_core::ApprovalRef::PolicyAuto => "policy:auto".to_string(),
+                },
+                _ => "unknown".to_string(),
+            };
+            let ttr_s = record
+                .result
+                .as_ref()
+                .map(|r| (r.finished_at - record.proposal.created_at).num_seconds());
+            state.knowledge.record_outcome(
+                &signature,
+                &record.proposal,
+                result.status,
+                ttr_s,
+                &approver,
+            );
+        }
+    }
     state.command_queue.record_result(result);
     StatusCode::ACCEPTED
 }

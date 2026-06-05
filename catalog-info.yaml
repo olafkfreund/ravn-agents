@@ -77,6 +77,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-server/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - axum
@@ -89,6 +90,8 @@ spec:
   providesApis:
     - ravn-control-plane-api
   dependsOn:
+    - component:ravn-core
+    - component:ravn-crypto
     - resource:ravn-postgres
     - resource:ravn-nats
 ---
@@ -100,6 +103,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-agent/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - agent
@@ -112,6 +116,8 @@ spec:
   consumesApis:
     - ravn-control-plane-api
   dependsOn:
+    - component:ravn-core
+    - component:ravn-crypto
     - component:ravn-actuator
     - resource:ravn-nats
 ---
@@ -123,6 +129,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-actuator/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - security
@@ -132,6 +139,9 @@ spec:
   lifecycle: experimental
   owner: olafkfreund
   system: ravn
+  dependsOn:
+    - component:ravn-core
+    - component:ravn-crypto
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -141,6 +151,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-k8s/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - kubernetes
@@ -151,6 +162,9 @@ spec:
   system: ravn
   consumesApis:
     - ravn-control-plane-api
+  dependsOn:
+    - component:ravn-core
+    - resource:ravn-nats
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -160,6 +174,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/portal/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - typescript
     - react
@@ -180,6 +195,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-core/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - library
@@ -197,6 +213,7 @@ metadata:
   annotations:
     github.com/project-slug: olafkfreund/ravn-agents
     backstage.io/source-location: url:https://github.com/olafkfreund/ravn-agents/tree/main/crates/ravn-crypto/
+    backstage.io/techdocs-ref: dir:.
   tags:
     - rust
     - library
@@ -206,6 +223,8 @@ spec:
   lifecycle: experimental
   owner: olafkfreund
   system: ravn
+  dependsOn:
+    - component:ravn-core
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Resource

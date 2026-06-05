@@ -11,6 +11,7 @@ use crate::command::{CommandQueue, CommandSigner};
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
 use crate::metrics::Metrics;
+use crate::policy::PolicyEngine;
 use crate::remediation::{RemediationStore, TemplateRegistry};
 
 /// Public OIDC settings the portal SPA needs to start the auth-code+PKCE flow
@@ -63,6 +64,9 @@ pub struct AppState {
     pub templates: Arc<TemplateRegistry>,
     /// In-memory remediation records: proposals, decisions, results (#115).
     pub remediations: Arc<RemediationStore>,
+    /// Declarative default-deny policy engine: decides auto vs. approve vs.
+    /// forbid, with the circuit breaker and kill switch (#116).
+    pub policy: Arc<PolicyEngine>,
     /// How long (seconds) signed commands stay valid (#114/#115).
     pub command_ttl_secs: i64,
 }

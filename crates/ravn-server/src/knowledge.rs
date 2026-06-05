@@ -38,6 +38,8 @@ fn status_str(status: ActionStatus) -> &'static str {
         ActionStatus::Succeeded => "succeeded",
         ActionStatus::Failed => "failed",
         ActionStatus::Rejected => "rejected",
+        ActionStatus::PreconditionFailed => "precondition_failed",
+        ActionStatus::Frozen => "frozen",
     }
 }
 

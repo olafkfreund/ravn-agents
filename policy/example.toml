@@ -1,0 +1,32 @@
+# Example remediation policy (#116). Point RAVN_POLICY_FILE at a per-env file
+# like this one. The policy is DEFAULT-DENY: any {host, risk_tier} not matched
+# by an `auto` rule requires human approval. `forbid` produces no proposal at
+# all. Rules are evaluated top-to-bottom; the FIRST match wins.
+#
+# Guardrails always apply on top of these rules:
+#   - the global kill switch (RAVN_REMEDIATION_AUTO, default off) forces every
+#     decision to `approve` until explicitly enabled;
+#   - the `dangerous` tier never auto-executes, even with an `auto` rule;
+#   - a per-(host, template) circuit breaker downgrades `auto` to `approve` once
+#     RAVN_REMEDIATION_AUTO_MAX auto-executions fire within
+#     RAVN_REMEDIATION_AUTO_WINDOW_SECS (kills restart storms / flapping).
+#
+# NOTE: policy-file *signing* (so a tampered policy cannot widen auto-execution)
+# is a follow-up; this file is loaded as-is for now.
+
+# Auto-restart safe, idempotent remediations on the web fleet.
+[[rule]]
+host = "web-*"
+tier = "safe"
+decision = "auto"
+
+# Service-affecting (guarded) actions always wait for a human, fleet-wide.
+[[rule]]
+tier = "guarded"
+decision = "approve"
+
+# Never even propose dangerous remediations on the database hosts.
+[[rule]]
+host = "db-*"
+tier = "dangerous"
+decision = "forbid"

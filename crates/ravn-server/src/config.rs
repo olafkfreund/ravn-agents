@@ -49,6 +49,27 @@ pub struct Config {
     /// unset the KB is disabled (no retrospective writing, recall, or gap
     /// tracking) — P1 behaviour is unchanged.
     pub kb_dir: Option<String>,
+    /// Remediation policy engine settings (#116): the per-env policy file plus
+    /// the global auto kill switch and circuit-breaker limits.
+    pub policy: PolicyConfig,
+}
+
+/// Remediation policy-engine configuration (#116). When no policy file is set,
+/// the default (empty) policy makes every match `approve` — P1 behaviour.
+#[derive(Debug, Clone)]
+pub struct PolicyConfig {
+    /// Path to the per-env policy TOML. `RAVN_POLICY_FILE`. Missing file → an
+    /// empty (default-deny) policy where everything requires approval.
+    pub file: Option<String>,
+    /// Fleet-wide kill switch. `RAVN_REMEDIATION_AUTO`, default **off**: when
+    /// off, every decision is forced to `approve` regardless of policy.
+    pub auto_enabled: bool,
+    /// Circuit-breaker cap: max auto-executions per `(host, template)` within
+    /// the window. `RAVN_REMEDIATION_AUTO_MAX`, default 5.
+    pub auto_max: u32,
+    /// Circuit-breaker window in seconds. `RAVN_REMEDIATION_AUTO_WINDOW_SECS`,
+    /// default 300.
+    pub auto_window_secs: u64,
 }
 
 /// Portal user OIDC + RBAC configuration (#26).
@@ -178,6 +199,25 @@ impl Config {
             .max(1);
         let kb_dir = token("RAVN_KB_DIR");
 
+        let policy = PolicyConfig {
+            file: token("RAVN_POLICY_FILE"),
+            // Off unless explicitly enabled — the kill switch defaults closed.
+            auto_enabled: matches!(
+                std::env::var("RAVN_REMEDIATION_AUTO").ok().as_deref(),
+                Some("1" | "true" | "yes" | "on")
+            ),
+            auto_max: std::env::var("RAVN_REMEDIATION_AUTO_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5)
+                .max(1),
+            auto_window_secs: std::env::var("RAVN_REMEDIATION_AUTO_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300)
+                .max(1),
+        };
+
         Ok(Self {
             bind,
             log,
@@ -194,6 +234,7 @@ impl Config {
             templates_dir,
             command_ttl_secs,
             kb_dir,
+            policy,
         })
     }
 

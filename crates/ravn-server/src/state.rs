@@ -12,6 +12,7 @@ use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
 use crate::knowledge::KnowledgeBase;
 use crate::metrics::Metrics;
+use crate::policy::PolicyEngine;
 use crate::remediation::{RemediationStore, TemplateRegistry};
 
 /// Public OIDC settings the portal SPA needs to start the auth-code+PKCE flow
@@ -68,6 +69,9 @@ pub struct AppState {
     /// retrospective writing, recall, and gap tracking. Disabled when
     /// `RAVN_KB_DIR` is unset.
     pub knowledge: Arc<KnowledgeBase>,
+    /// Declarative default-deny policy engine: decides auto vs. approve vs.
+    /// forbid, with the circuit breaker and kill switch (#116).
+    pub policy: Arc<PolicyEngine>,
     /// How long (seconds) signed commands stay valid (#114/#115).
     pub command_ttl_secs: i64,
 }

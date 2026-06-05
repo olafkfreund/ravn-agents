@@ -23,6 +23,7 @@ use ravn_core::{
 use uuid::Uuid;
 
 use crate::command::CommandSigner;
+use crate::policy::PolicyDecision;
 
 /// Curated templates loaded from a directory at startup.
 #[derive(Default)]
@@ -137,6 +138,17 @@ pub fn build_command(
         .map(|c| c.resolve(&proposal.params))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("resolving steps: {e}"))?;
+    let preconditions = template
+        .preconditions
+        .iter()
+        .map(|c| {
+            Ok(ravn_core::Condition {
+                check: c.check.resolve(&proposal.params)?,
+                equals: c.equals.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ravn_core::RenderError>>()
+        .map_err(|e| anyhow::anyhow!("resolving preconditions: {e}"))?;
     let verify = match &template.verify {
         Some(v) => Some(ravn_core::Verify {
             check: v.check.resolve(&proposal.params).map_err(|e| anyhow::anyhow!("resolving verify: {e}"))?,
@@ -152,8 +164,10 @@ pub fn build_command(
         template_id: template.id.clone(),
         template_version: template.version,
         risk_tier: template.risk_tier,
+        preconditions,
         steps,
         verify,
+        rollback: template.rollback,
         approval_ref: approval,
         nonce: Uuid::now_v7().to_string(),
         issued_at: now,
@@ -203,6 +217,42 @@ impl RemediationStore {
             decision: Decision::Pending,
             command_id: None,
             signature: None,
+            result: None,
+            updated_at: Utc::now(),
+        });
+        Some(id)
+    }
+
+    /// Insert a record that policy auto-approved and the control plane already
+    /// signed and enqueued (#116). Deduped against identical *pending* proposals
+    /// just like [`Self::insert`], so a recurring fault that a human is already
+    /// looking at is not also auto-fired. Returns the proposal id, or `None` if
+    /// deduped.
+    pub fn insert_auto_approved(
+        &self,
+        proposal: RemediationProposal,
+        command_id: Uuid,
+        signature: Option<String>,
+        fault_signature: String,
+    ) -> Option<Uuid> {
+        let mut records = self.records.lock().expect("remediation store poisoned");
+        let dup = records.iter().any(|r| {
+            matches!(r.decision, Decision::Pending)
+                && r.proposal.template_id == proposal.template_id
+                && r.proposal.agent_id == proposal.agent_id
+                && r.proposal.params == proposal.params
+        });
+        if dup {
+            return None;
+        }
+        let id = proposal.id;
+        // Retain the fault signature so the result later updates the KB (#118).
+        self.signatures.lock().expect("remediation store poisoned").insert(id, fault_signature);
+        records.push(RemediationRecord {
+            proposal,
+            decision: Decision::Approved { by: ApprovalRef::PolicyAuto },
+            command_id: Some(command_id),
+            signature,
             result: None,
             updated_at: Utc::now(),
         });
@@ -273,13 +323,16 @@ impl RemediationStore {
 }
 
 /// Prepare hook, called best-effort after a message is persisted (#115). Matches
-/// a template, resolves parameters, and records a pending proposal. Never blocks
-/// or errors the ingestion path.
+/// a template and resolves parameters, then asks the policy engine (#116) what
+/// to do: `auto` signs + enqueues the command immediately and records it as
+/// approved-by-[`ApprovalRef::PolicyAuto`]; `approve` records a pending proposal
+/// for a human (the default); `forbid` produces nothing. Never blocks or errors
+/// the ingestion path.
 ///
-/// Two knowledge-base behaviours hang off this (#118): on a *matched* fault the
-/// proposal's rationale is biased with a deterministic recall note ("last N×
-/// this fired, template X succeeded"); on an *unmatched* fault a `gap` entry is
-/// written so operators can see which faults still need a template.
+/// Knowledge base (#118): on a *matched* fault the proposal's rationale is biased
+/// with a deterministic recall note ("last N× this fired, template X succeeded");
+/// on an *unmatched* fault a `gap` entry is written so operators can see which
+/// faults still need a template.
 pub fn prepare(state: &crate::state::AppState, message: &ravn_core::Message) {
     let event = &message.event;
     let signature = crate::knowledge::fault_signature(event);
@@ -297,12 +350,56 @@ pub fn prepare(state: &crate::state::AppState, message: &ravn_core::Message) {
     };
     let template_id = template.id.clone();
     let mut proposal = build_proposal(template, event, params);
-    // Deterministic recall: surface past resolutions of this exact fault.
+    // Deterministic recall: surface past resolutions of this exact fault (#118).
     if let Some(note) = state.knowledge.recall(&signature) {
         proposal.rationale = format!("{} {}", proposal.rationale, note);
     }
-    if let Some(id) = state.remediations.insert(proposal, signature) {
-        tracing::info!(proposal = %id, template = %template_id, host = %event.host, "remediation proposed");
+
+    match state.policy.evaluate(&event.host, template.risk_tier, &template_id, Utc::now()) {
+        PolicyDecision::Forbid => {
+            tracing::info!(template = %template_id, host = %event.host, "remediation forbidden by policy");
+        }
+        PolicyDecision::Approve => {
+            if let Some(id) = state.remediations.insert(proposal, signature) {
+                tracing::info!(proposal = %id, template = %template_id, host = %event.host, "remediation proposed (awaiting approval)");
+            }
+        }
+        PolicyDecision::Auto => {
+            auto_execute(state, template, proposal, &template_id, &event.host, signature)
+        }
+    }
+}
+
+/// Sign, enqueue, and record a policy-auto-approved remediation. Best-effort: a
+/// build failure is logged and dropped (it must never disturb ingestion).
+fn auto_execute(
+    state: &crate::state::AppState,
+    template: &Template,
+    proposal: RemediationProposal,
+    template_id: &str,
+    host: &str,
+    fault_signature: String,
+) {
+    let envelope = match build_command(
+        &proposal,
+        template,
+        &state.command_signer,
+        ApprovalRef::PolicyAuto,
+        state.command_ttl_secs,
+    ) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(%e, template = %template_id, host, "could not build auto-remediation command");
+            return;
+        }
+    };
+    let command_id = envelope.command_id;
+    let signature = envelope.sig.clone();
+    if let Some(id) =
+        state.remediations.insert_auto_approved(proposal, command_id, signature, fault_signature)
+    {
+        state.command_queue.enqueue(envelope);
+        tracing::info!(proposal = %id, %command_id, template = %template_id, host, "remediation auto-executed by policy");
     }
 }
 
@@ -374,6 +471,42 @@ mod tests {
         // And it verifies against the signer's public key.
         let pk = verifying_key_from_b64(signer.pubkey_b64()).unwrap();
         verify_envelope(&pk, &env, Utc::now()).unwrap();
+    }
+
+    #[test]
+    fn insert_auto_approved_records_policy_auto_and_command() {
+        let reg = registry();
+        let event = failed_unit_event("nginx.service");
+        let tpl = reg.match_event(&event).unwrap();
+        let proposal = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
+        let store = RemediationStore::default();
+
+        let command_id = Uuid::now_v7();
+        let id = store
+            .insert_auto_approved(proposal, command_id, Some("sig".into()), "sig:fault".into())
+            .expect("inserted");
+        // It is already approved (not pending) and carries the command.
+        assert!(store.pending_proposal(id).is_none(), "auto-approved is not pending");
+        let rec = store.list().into_iter().find(|r| r.proposal.id == id).unwrap();
+        assert!(matches!(rec.decision, Decision::Approved { by: ApprovalRef::PolicyAuto }));
+        assert_eq!(rec.command_id, Some(command_id));
+        assert_eq!(rec.signature.as_deref(), Some("sig"));
+    }
+
+    #[test]
+    fn insert_auto_approved_dedupes_against_pending() {
+        let reg = registry();
+        let event = failed_unit_event("nginx.service");
+        let tpl = reg.match_event(&event).unwrap();
+        let store = RemediationStore::default();
+
+        // A human is already looking at an identical pending proposal …
+        let pending = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
+        assert!(store.insert(pending, "sig:fault".into()).is_some());
+        // … so an auto attempt for the same fault is deduped (not double-fired).
+        let auto = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
+        assert!(store.insert_auto_approved(auto, Uuid::now_v7(), None, "sig:fault".into()).is_none());
+        assert_eq!(store.list().len(), 1);
     }
 
     #[test]

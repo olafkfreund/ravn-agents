@@ -14,6 +14,7 @@ mod inference;
 mod ingest;
 mod knowledge;
 mod metrics;
+mod policy;
 mod remediation;
 mod state;
 
@@ -159,6 +160,33 @@ async fn main() -> anyhow::Result<()> {
             .context("opening the remediation knowledge base")?,
     );
 
+    // Remediation policy engine (#116): the per-env default-deny policy plus the
+    // global auto kill switch and the circuit breaker. With no policy file and
+    // the kill switch off (the defaults), every match requires approval (P1).
+    let policy_doc = match &config.policy.file {
+        Some(path) => policy::Policy::load_file(std::path::Path::new(path))
+            .context("loading remediation policy")?,
+        None => {
+            tracing::info!("no RAVN_POLICY_FILE set — all remediations require approval (default-deny)");
+            policy::Policy::default()
+        }
+    };
+    if config.policy.auto_enabled {
+        tracing::info!(
+            max = config.policy.auto_max,
+            window_secs = config.policy.auto_window_secs,
+            "remediation auto-execute ENABLED (policy-gated, circuit-broken)"
+        );
+    } else {
+        tracing::info!("remediation auto-execute disabled (kill switch) — set RAVN_REMEDIATION_AUTO=1 to enable");
+    }
+    let policy = std::sync::Arc::new(policy::PolicyEngine::new(
+        policy_doc,
+        config.policy.auto_enabled,
+        config.policy.auto_max,
+        std::time::Duration::from_secs(config.policy.auto_window_secs),
+    ));
+
     let app_state = AppState {
         pool,
         nats,
@@ -178,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
         templates,
         remediations,
         knowledge,
+        policy,
         command_ttl_secs: config.command_ttl_secs,
     };
 

@@ -23,13 +23,16 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Rust/Cargo sources, plus test fixture data files (#39) that
-        # cleanCargoSource would otherwise strip (it keeps only *.rs/Cargo.*).
+        # Rust/Cargo sources, plus data files cleanCargoSource would otherwise
+        # strip (it keeps only *.rs/Cargo.*): test fixtures (#39) and the SQLx
+        # migrations, which `sqlx::migrate!` embeds at build time (#24) — without
+        # them the control plane starts with no schema.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "ravn-source";
           filter = path: type:
             (pkgs.lib.hasInfix "/tests/fixtures/" path)
+            || (pkgs.lib.hasInfix "/migrations/" path)
             || (craneLib.filterCargoSources path type);
         };
 

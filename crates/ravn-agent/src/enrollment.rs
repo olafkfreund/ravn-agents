@@ -86,6 +86,10 @@ pub async fn ensure_enrolled(config: &Config) -> Result<Option<Identity>> {
         .with_context(|| format!("writing {}", id.cert_path.display()))?;
     std::fs::write(&id.ca_path, &enrolled.ca_certificate_pem)
         .with_context(|| format!("writing {}", id.ca_path.display()))?;
+    // Pin the control plane's command-signing public key (#114): the agent
+    // rejects any remediation command that does not verify against it.
+    std::fs::write(config.cred_dir.join("command_pubkey.b64"), &enrolled.command_signing_pubkey)
+        .with_context(|| format!("writing command_pubkey.b64 in {}", config.cred_dir.display()))?;
 
     tracing::info!(
         agent_id = %config.agent_id,

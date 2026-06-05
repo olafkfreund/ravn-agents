@@ -308,9 +308,37 @@ async fn enroll(
         agent_id: req.agent_id,
         certificate_pem,
         ca_certificate_pem: ca.ca_cert_pem().to_string(),
+        command_signing_pubkey: state.command_signer.pubkey_b64().to_string(),
         not_after,
     })
     .into_response()
+}
+
+/// Pull pending remediation commands for an agent (#114). The agent long-polls
+/// this over its outbound connection, verifies each signed [`CommandEnvelope`]
+/// against the pinned control-plane key, and executes via the actuator.
+///
+/// Auth: behind the API's bearer middleware in P1. Per-agent authentication of
+/// the puller (so an agent can only read *its own* commands) is the remaining
+/// transport-auth work (#26); signing already prevents any forged command from
+/// being executed regardless of who pulls.
+async fn get_commands(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Json<Vec<ravn_core::CommandEnvelope>> {
+    Json(state.command_queue.take_for(agent_id))
+}
+
+/// Report the outcome of a command (#114): the agent POSTs an [`ActionResult`]
+/// after the actuator runs (or rejects) it.
+async fn post_command_result(
+    State(state): State<AppState>,
+    Path((_agent_id, _command_id)): Path<(Uuid, Uuid)>,
+    Json(result): Json<ravn_core::ActionResult>,
+) -> StatusCode {
+    tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
+    state.command_queue.record_result(result);
+    StatusCode::ACCEPTED
 }
 
 /// Authenticated HTTP ingest (#57): in-cluster agents POST a [`Message`] with
@@ -505,6 +533,8 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/enroll", axum::routing::post(enroll))
         .route("/ingest", axum::routing::post(ingest))
+        .route("/agents/{id}/commands", get(get_commands))
+        .route("/agents/{id}/commands/{cmd}/result", axum::routing::post(post_command_result))
         .route("/auth/config", get(auth_config))
         .route("/api/me", get(me))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))

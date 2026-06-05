@@ -11,6 +11,7 @@ use crate::command::{CommandQueue, CommandSigner};
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
 use crate::metrics::Metrics;
+use crate::remediation::{RemediationStore, TemplateRegistry};
 
 /// Public OIDC settings the portal SPA needs to start the auth-code+PKCE flow
 /// (#26). Served at `/auth/config`; contains no secrets.
@@ -58,4 +59,10 @@ pub struct AppState {
     /// Per-agent queue of signed commands awaiting pull, plus reported results
     /// (#114). The orchestrator (#115) enqueues; agents pull and report.
     pub command_queue: Arc<CommandQueue>,
+    /// Curated remediation templates loaded at startup (#115).
+    pub templates: Arc<TemplateRegistry>,
+    /// In-memory remediation records: proposals, decisions, results (#115).
+    pub remediations: Arc<RemediationStore>,
+    /// How long (seconds) signed commands stay valid (#114/#115).
+    pub command_ttl_secs: i64,
 }

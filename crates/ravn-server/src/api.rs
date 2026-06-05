@@ -337,8 +337,74 @@ async fn post_command_result(
     Json(result): Json<ravn_core::ActionResult>,
 ) -> StatusCode {
     tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
+    // Close the matching remediation record (#115), and keep the raw result.
+    state.remediations.record_result(result.clone());
     state.command_queue.record_result(result);
     StatusCode::ACCEPTED
+}
+
+/// List remediation records — pending proposals plus decided/executed history
+/// (#115). Drives the portal approval queue (#119).
+async fn list_remediations(State(state): State<AppState>) -> Json<Vec<ravn_core::RemediationRecord>> {
+    Json(state.remediations.list())
+}
+
+/// Approve a pending remediation (#115): sign a command for the proposal and
+/// enqueue it for the agent to pull. Mutating → requires admin (RBAC).
+async fn approve_remediation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    role: Option<axum::Extension<Role>>,
+) -> Response {
+    let Some(proposal) = state.remediations.pending_proposal(id) else {
+        return (StatusCode::NOT_FOUND, "no pending remediation with that id").into_response();
+    };
+    let Some(template) = state.templates.get(&proposal.template_id) else {
+        return (StatusCode::CONFLICT, "template for this proposal is no longer loaded").into_response();
+    };
+    let user = match role.map(|axum::Extension(r)| r).unwrap_or(Role::Admin) {
+        Role::Admin => "admin",
+        Role::Viewer => "viewer",
+    };
+    let approval = ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() };
+    let envelope = match crate::remediation::build_command(
+        &proposal,
+        template,
+        &state.command_signer,
+        approval,
+        state.command_ttl_secs,
+    ) {
+        Ok(env) => env,
+        Err(error) => return ApiError(error).into_response(),
+    };
+    let command_id = envelope.command_id;
+    let signature = envelope.sig.clone();
+    state.command_queue.enqueue(envelope);
+    state.remediations.approve(
+        id,
+        ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() },
+        command_id,
+        signature,
+    );
+    tracing::info!(remediation = %id, %command_id, "remediation approved; command enqueued");
+    Json(serde_json::json!({ "approved": true, "command_id": command_id })).into_response()
+}
+
+/// Reject a pending remediation (#115). Mutating → requires admin (RBAC).
+async fn reject_remediation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    role: Option<axum::Extension<Role>>,
+) -> Response {
+    let user = match role.map(|axum::Extension(r)| r).unwrap_or(Role::Admin) {
+        Role::Admin => "admin",
+        Role::Viewer => "viewer",
+    };
+    if state.remediations.reject(id, user.to_string(), None) {
+        Json(serde_json::json!({ "rejected": true })).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no remediation with that id").into_response()
+    }
 }
 
 /// Authenticated HTTP ingest (#57): in-cluster agents POST a [`Message`] with
@@ -535,6 +601,9 @@ pub fn router(state: AppState) -> Router {
         .route("/ingest", axum::routing::post(ingest))
         .route("/agents/{id}/commands", get(get_commands))
         .route("/agents/{id}/commands/{cmd}/result", axum::routing::post(post_command_result))
+        .route("/api/remediations", get(list_remediations))
+        .route("/api/remediations/{id}/approve", axum::routing::post(approve_remediation))
+        .route("/api/remediations/{id}/reject", axum::routing::post(reject_remediation))
         .route("/auth/config", get(auth_config))
         .route("/api/me", get(me))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))

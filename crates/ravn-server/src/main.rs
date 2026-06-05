@@ -13,6 +13,7 @@ mod db;
 mod inference;
 mod ingest;
 mod metrics;
+mod remediation;
 mod state;
 
 use anyhow::Context;
@@ -143,6 +144,13 @@ async fn main() -> anyhow::Result<()> {
     );
     let command_queue = std::sync::Arc::new(command::CommandQueue::default());
 
+    // Curated remediation templates (#115): loaded once at startup.
+    let templates = std::sync::Arc::new(
+        remediation::TemplateRegistry::load_dir(std::path::Path::new(&config.templates_dir))
+            .context("loading remediation templates")?,
+    );
+    let remediations = std::sync::Arc::new(remediation::RemediationStore::default());
+
     let app_state = AppState {
         pool,
         nats,
@@ -159,6 +167,9 @@ async fn main() -> anyhow::Result<()> {
         oidc_public,
         command_signer,
         command_queue,
+        templates,
+        remediations,
+        command_ttl_secs: config.command_ttl_secs,
     };
 
     // Spawn the ingestion loops (events + heartbeats).

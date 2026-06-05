@@ -67,6 +67,10 @@ pub async fn persist_message(state: &AppState, message: &Message) {
     // K8s events arrive detection-only; enrich them with an explanation
     // asynchronously, off this path (#58).
     maybe_explain(state, message);
+
+    // Remediation Prepare (#115): best-effort — match a template and record a
+    // proposal. Never blocks or fails ingestion.
+    crate::remediation::prepare(state, message);
 }
 
 /// Spawn an async explanation for a bare K8s event when inference is

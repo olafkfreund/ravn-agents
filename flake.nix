@@ -64,6 +64,16 @@
           meta.mainProgram = "ravn-server";
         });
 
+        # The privileged remediation executor (#113): the only privileged Ravn
+        # component on a host. Packaged so the NixOS module can run it (#120).
+        ravn-actuator = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "ravn-actuator";
+          cargoExtraArgs = "-p ravn-actuator";
+          doCheck = false;
+          meta.mainProgram = "ravn-actuator";
+        });
+
         # The Kubernetes binaries (#55/#56): controller + node-agent, both from
         # the ravn-k8s crate. One package, two bins.
         ravn-k8s = craneLib.buildPackage (commonArgs // {
@@ -104,13 +114,13 @@
       in
       {
         packages = {
-          inherit ravn-agent ravn-server ravn-k8s
+          inherit ravn-agent ravn-server ravn-k8s ravn-actuator
             ravn-agent-image ravn-server-image ravn-k8s-image;
           default = ravn-server;
         };
 
         checks = {
-          inherit ravn-agent ravn-server ravn-k8s;
+          inherit ravn-agent ravn-server ravn-k8s ravn-actuator;
 
           # Whole-workspace clippy and tests gate `nix flake check`.
           workspace-clippy = craneLib.cargoClippy (commonArgs // {
@@ -135,6 +145,7 @@
       overlays.default = final: _prev: {
         ravn-agent = self.packages.${final.stdenv.hostPlatform.system}.ravn-agent;
         ravn-server = self.packages.${final.stdenv.hostPlatform.system}.ravn-server;
+        ravn-actuator = self.packages.${final.stdenv.hostPlatform.system}.ravn-actuator;
       };
 
       nixosModules = {

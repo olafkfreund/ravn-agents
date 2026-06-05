@@ -19,16 +19,22 @@ at the repo root, which Backstage discovers from GitHub.
 The published site under `docs/` is **Jekyll** (Liquid templating), which MkDocs
 can't parse. So TechDocs has its own source directory, `docs-techdocs/`, built by
 [`mkdocs.yml`](https://github.com/olafkfreund/ravn-agents/blob/main/mkdocs.yml).
-It holds this landing page plus **symlinks** to the MkDocs-safe canonical files
-(architecture, roadmap, contributing, security) and to **every design spec under
-`plans/`**.
+It holds this landing page plus **real copies** of the MkDocs-safe canonical
+files (architecture, roadmap, contributing, security) and of **every design spec
+under `plans/`**.
+
+> These are *copies*, not symlinks, on purpose: Backstage's TechDocs reader
+> downloads the repo through its GitHub UrlReader, whose archive extraction does
+> not reliably preserve symlinks — committed symlinks make the built-in builder
+> fail to find the docs. Copies read identically everywhere.
 
 [`scripts/techdocs-sync.sh`](https://github.com/olafkfreund/ravn-agents/blob/main/scripts/techdocs-sync.sh)
-regenerates those symlinks from the canonical sources, and the
-**TechDocs CI workflow** (`.github/workflows/techdocs.yml`) runs it before every
-build. Because `mkdocs.yml` has no hand-maintained `nav`, **a doc added to
-`docs/` or `plans/` appears in Backstage automatically** on the next push — no
-catalog edit required.
+regenerates those copies from the canonical sources. The **TechDocs CI workflow**
+(`.github/workflows/techdocs.yml`) runs it and **fails the build if the committed
+copies are stale** ("run techdocs-sync"), so they're always fresh. Because
+`mkdocs.yml` has no hand-maintained `nav`, **a doc added to `docs/` or `plans/`
+appears in Backstage automatically** once synced + committed — no catalog edit
+required.
 
 ## Publishing (one-time setup)
 

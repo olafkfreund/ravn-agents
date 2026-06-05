@@ -54,8 +54,14 @@ jobs:
           pip install mkdocs-techdocs-core
           npm install -g @techdocs/cli
 
-      - name: Sync docs sources (regenerate symlinks)
-        run: ./scripts/techdocs-sync.sh
+      - name: Sync docs sources + check they're committed fresh
+        run: |
+          ./scripts/techdocs-sync.sh
+          if ! git diff --quiet -- docs-techdocs; then
+            echo "::error::docs-techdocs/ is out of date. Run scripts/techdocs-sync.sh and commit the result."
+            git --no-pager diff --stat -- docs-techdocs
+            exit 1
+          fi
 
       - name: Generate (build + validate) TechDocs
         run: npx @techdocs/cli generate --no-docker --source-dir . --output-dir ./site --verbose

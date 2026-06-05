@@ -5,6 +5,7 @@ import {
   getMe,
   listRemediations,
   rejectRemediation,
+  remediationErrorMessage,
   type ActionStatus,
   type RemediationRecord,
   type RiskTier,
@@ -76,7 +77,7 @@ export function Remediations() {
       {remsQ.isLoading && <p className="text-muted">Loading…</p>}
       {remsQ.isError && (
         <div className="rounded-xl border border-sev-error/40 bg-sev-error/8 p-6 text-center text-sev-error">
-          Couldn’t reach the control plane.
+          {remediationErrorMessage(remsQ.error)}
         </div>
       )}
 

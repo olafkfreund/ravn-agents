@@ -140,31 +140,69 @@ export interface RemediationRecord {
   updated_at: string;
 }
 
-/** Fetch with the bearer token attached (for endpoints outside the typed client). */
-async function authedFetch(input: string, init?: RequestInit): Promise<Response> {
+/** Distinguishable failure reasons for the remediation API. */
+export type RemediationErrorKind = "unreachable" | "unauthorized" | "not_found" | "server";
+
+/** A failure talking to the remediation API, tagged with its cause. */
+export class RemediationError extends Error {
+  constructor(public readonly kind: RemediationErrorKind, message: string) {
+    super(message);
+    this.name = "RemediationError";
+  }
+}
+
+/** A user-facing message for a remediation API failure, by cause. */
+export function remediationErrorMessage(error: unknown): string {
+  const kind = error instanceof RemediationError ? error.kind : "unreachable";
+  switch (kind) {
+    case "not_found":
+      return "This control plane has no remediation API. Update ravn-server — the /api/remediations endpoints ship with the self-healing loop (#115).";
+    case "unauthorized":
+      return "Not authorized to view remediations — sign in with an account that has access.";
+    case "server":
+      return "The control plane returned an error loading remediations.";
+    default:
+      return "Couldn’t reach the control plane.";
+  }
+}
+
+/** Fetch a remediation endpoint with the bearer token, raising a typed
+ *  RemediationError that distinguishes network / 401-403 / 404 / 5xx failures. */
+async function remediationFetch(input: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(input, { ...init, headers });
-  if (res.status === 401) clearToken();
+  let res: Response;
+  try {
+    res = await fetch(input, { ...init, headers });
+  } catch {
+    throw new RemediationError("unreachable", "control plane unreachable");
+  }
+  if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) clearToken();
+    throw new RemediationError("unauthorized", `unauthorized (${res.status})`);
+  }
+  if (res.status === 404) {
+    throw new RemediationError("not_found", "remediation API not found (404)");
+  }
+  if (!res.ok) {
+    throw new RemediationError("server", `server error (${res.status})`);
+  }
   return res;
 }
 
 /** List remediation records — pending proposals plus decided/executed history. */
 export async function listRemediations(): Promise<RemediationRecord[]> {
-  const res = await authedFetch("/api/remediations");
-  if (!res.ok) throw new Error("Failed to load remediations");
+  const res = await remediationFetch("/api/remediations");
   return (await res.json()) as RemediationRecord[];
 }
 
 /** Approve a pending remediation: signs a command and enqueues it for the agent. */
 export async function approveRemediation(id: string): Promise<void> {
-  const res = await authedFetch(`/api/remediations/${id}/approve`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to approve remediation");
+  await remediationFetch(`/api/remediations/${id}/approve`, { method: "POST" });
 }
 
 /** Reject a pending remediation. */
 export async function rejectRemediation(id: string): Promise<void> {
-  const res = await authedFetch(`/api/remediations/${id}/reject`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to reject remediation");
+  await remediationFetch(`/api/remediations/${id}/reject`, { method: "POST" });
 }

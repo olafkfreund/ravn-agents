@@ -12,3 +12,8 @@ serde_json.workspace = true
 schemars = { version = "0.8", features = ["uuid1", "chrono"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# Templates are authored as TOML; the runtime crate stays TOML-free (the loader
+# lives in consumers), but the schema tests parse the real on-disk format.
+toml = "0.8"

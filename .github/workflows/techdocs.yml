@@ -67,9 +67,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TECHDOCS_AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ vars.TECHDOCS_AWS_REGION }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.TECHDOCS_GCS_CREDENTIALS_FILE }}
+        # Publish the same built site for every entity that carries a
+        # backstage.io/techdocs-ref, so the "View TechDocs" tab resolves on the
+        # System and each Component (matches catalog-info.yaml).
         run: |
-          npx @techdocs/cli publish \
-            --publisher-type "${{ vars.TECHDOCS_PUBLISHER_TYPE }}" \
-            --storage-name "${{ vars.TECHDOCS_STORAGE_NAME }}" \
-            --entity default/system/ravn \
-            --directory ./site
+          for entity in \
+            system/ravn \
+            component/ravn-server \
+            component/ravnd \
+            component/ravn-actuator \
+            component/ravn-controller \
+            component/ravn-portal \
+            component/ravn-core \
+            component/ravn-crypto; do
+            echo "publishing default/${entity}"
+            npx @techdocs/cli publish \
+              --publisher-type "${{ vars.TECHDOCS_PUBLISHER_TYPE }}" \
+              --storage-name "${{ vars.TECHDOCS_STORAGE_NAME }}" \
+              --entity "default/${entity}" \
+              --directory ./site
+          done

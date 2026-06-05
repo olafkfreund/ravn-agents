@@ -49,6 +49,9 @@ pub enum Capability {
     RestartUnit { unit: String },
     /// Read-only: report a unit's active state (used in checks).
     UnitState { unit: String },
+    /// Roll the host back to its previous NixOS generation — the universal net
+    /// used by [`Rollback::NixGeneration`]. Targets no unit.
+    NixRollback,
 }
 
 impl Capability {
@@ -71,6 +74,8 @@ impl Capability {
             Capability::UnitState { unit } => {
                 Capability::UnitState { unit: resolve_str(unit, values)? }
             }
+            // No string fields to resolve.
+            Capability::NixRollback => Capability::NixRollback,
         })
     }
 }
@@ -101,7 +106,7 @@ fn default_verify_timeout() -> u64 {
     30
 }
 
-/// What to do if verification fails. (Capability-based rollback is added in P3.)
+/// What to do if verification fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Rollback {
@@ -273,6 +278,8 @@ fn placeholders_in_capability(cap: &Capability) -> Vec<String> {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
         | Capability::UnitState { unit } => unit,
+        // No string fields, so no placeholders.
+        Capability::NixRollback => return Vec::new(),
     };
     placeholders_in_str(field)
 }
@@ -310,10 +317,19 @@ pub struct CommandEnvelope {
     pub template_id: String,
     pub template_version: u32,
     pub risk_tier: RiskTier,
+    /// Fully-resolved read-only checks the actuator evaluates *before* running
+    /// `steps`; if any fails the command is not executed (#117). Defaulted for
+    /// backward compatibility with envelopes minted before P3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<Condition>,
     /// Ordered, fully-resolved capabilities to execute.
     pub steps: Vec<Capability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<Verify>,
+    /// What to do if `verify` fails (#117). Defaulted to [`Rollback::None`] for
+    /// backward compatibility with envelopes minted before P3.
+    #[serde(default)]
+    pub rollback: Rollback,
     pub approval_ref: ApprovalRef,
     /// Random per-command nonce; with `expires_at` this defeats replay.
     pub nonce: String,
@@ -338,8 +354,10 @@ impl CommandEnvelope {
             template_id: &'a str,
             template_version: u32,
             risk_tier: &'a RiskTier,
+            preconditions: &'a [Condition],
             steps: &'a [Capability],
             verify: &'a Option<Verify>,
+            rollback: &'a Rollback,
             approval_ref: &'a ApprovalRef,
             nonce: &'a str,
             issued_at: &'a DateTime<Utc>,
@@ -351,8 +369,10 @@ impl CommandEnvelope {
             template_id: &self.template_id,
             template_version: self.template_version,
             risk_tier: &self.risk_tier,
+            preconditions: &self.preconditions,
             steps: &self.steps,
             verify: &self.verify,
+            rollback: &self.rollback,
             approval_ref: &self.approval_ref,
             nonce: &self.nonce,
             issued_at: &self.issued_at,
@@ -368,10 +388,16 @@ impl CommandEnvelope {
 pub enum ActionStatus {
     /// All steps ran and verification (if any) passed.
     Succeeded,
+    /// A precondition did not hold, so no step ran (#117).
+    PreconditionFailed,
     /// A step or verification failed.
     Failed,
     /// The agent or actuator refused the command (bad signature, expired, etc.).
     Rejected,
+    /// Verification failed *and* the declared rollback also failed: the host is
+    /// left in an unknown state, so upstream must stop auto-acting on this target
+    /// and escalate to a human (#117).
+    Frozen,
 }
 
 /// The agent's report on a command's execution.
@@ -585,8 +611,10 @@ mod tests {
             template_id: "failed-unit-restart".into(),
             template_version: 3,
             risk_tier: RiskTier::Safe,
+            preconditions: vec![],
             steps: vec![Capability::RestartUnit { unit: "nginx.service".into() }],
             verify: None,
+            rollback: Rollback::None,
             approval_ref: ApprovalRef::PolicyAuto,
             nonce: "abc123".into(),
             issued_at: now,
@@ -610,6 +638,10 @@ mod tests {
             template_id: "t".into(),
             template_version: 1,
             risk_tier: RiskTier::Guarded,
+            preconditions: vec![Condition {
+                check: Capability::UnitState { unit: "a.service".into() },
+                equals: "failed".into(),
+            }],
             steps: vec![
                 Capability::ResetFailed { unit: "a.service".into() },
                 Capability::RestartUnit { unit: "a.service".into() },
@@ -619,6 +651,7 @@ mod tests {
                 equals: "active".into(),
                 timeout_s: 15,
             }),
+            rollback: Rollback::NixGeneration,
             approval_ref: ApprovalRef::Human { user: "olaf".into(), approved_at: now },
             nonce: "n".into(),
             issued_at: now,
@@ -628,6 +661,36 @@ mod tests {
         let json = serde_json::to_string(&env).unwrap();
         let back: CommandEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn legacy_envelope_without_p3_fields_still_deserializes() {
+        // An envelope minted before #117 carries neither `preconditions` nor
+        // `rollback`; both must default so older control planes stay compatible.
+        let json = r#"{
+            "command_id": "018f0000-0000-7000-8000-000000000000",
+            "agent_id": "018f0000-0000-7000-8000-000000000001",
+            "template_id": "failed-unit-restart",
+            "template_version": 3,
+            "risk_tier": "safe",
+            "steps": [{ "capability": "restart_unit", "unit": "nginx.service" }],
+            "approval_ref": { "kind": "policy_auto" },
+            "nonce": "n",
+            "issued_at": "2026-06-05T00:00:00Z",
+            "expires_at": "2026-06-05T00:05:00Z"
+        }"#;
+        let env: CommandEnvelope = serde_json::from_str(json).unwrap();
+        assert!(env.preconditions.is_empty());
+        assert_eq!(env.rollback, Rollback::None);
+    }
+
+    #[test]
+    fn nix_rollback_capability_is_mutating_and_resolves_to_itself() {
+        let cap = Capability::NixRollback;
+        assert!(!cap.is_read_only());
+        assert_eq!(cap.resolve(&BTreeMap::new()).unwrap(), Capability::NixRollback);
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["capability"], "nix_rollback");
     }
 
     #[test]

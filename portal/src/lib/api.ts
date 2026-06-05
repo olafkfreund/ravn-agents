@@ -91,7 +91,12 @@ export async function getTopology(groupBy?: string): Promise<Topology> {
 // types don't derive utoipa schemas), so they use plain fetch with local types.
 
 export type RiskTier = "safe" | "guarded" | "dangerous";
-export type ActionStatus = "succeeded" | "failed" | "rejected";
+export type ActionStatus =
+  | "succeeded"
+  | "precondition_failed"
+  | "failed"
+  | "rejected"
+  | "frozen";
 
 /** Who or what approved an action. */
 export type ApprovalRef =

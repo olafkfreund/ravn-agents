@@ -24,9 +24,6 @@ use uuid::Uuid;
 /// Holds the control plane's Ed25519 signing key and the base64 public key it
 /// advertises to agents at enrollment.
 pub struct CommandSigner {
-    // Read by `sign`, which the orchestrator (#115) calls. The public key is
-    // already in use today (advertised at enrollment).
-    #[allow(dead_code)]
     key: SigningKey,
     pubkey_b64: String,
 }

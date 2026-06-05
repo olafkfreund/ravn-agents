@@ -39,6 +39,12 @@ pub struct Config {
     /// `RAVN_COMMAND_KEY`. Generated and persisted (`0600`) if absent; when
     /// unset entirely, an ephemeral key is used (dev only).
     pub command_key_path: Option<String>,
+    /// Directory of curated remediation templates (#115). `RAVN_TEMPLATES_DIR`,
+    /// default `templates`. Missing dir → no proposals.
+    pub templates_dir: String,
+    /// How long (seconds) a signed command stays valid. `RAVN_COMMAND_TTL_SECS`,
+    /// default 300.
+    pub command_ttl_secs: i64,
 }
 
 /// Portal user OIDC + RBAC configuration (#26).
@@ -160,6 +166,12 @@ impl Config {
         let inference = Self::inference_from_env(&token)?;
         let oidc = Self::oidc_from_env(&token)?;
         let command_key_path = token("RAVN_COMMAND_KEY");
+        let templates_dir = token("RAVN_TEMPLATES_DIR").unwrap_or_else(|| "templates".to_string());
+        let command_ttl_secs = std::env::var("RAVN_COMMAND_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300)
+            .max(1);
 
         Ok(Self {
             bind,
@@ -174,6 +186,8 @@ impl Config {
             inference,
             oidc,
             command_key_path,
+            templates_dir,
+            command_ttl_secs,
         })
     }
 

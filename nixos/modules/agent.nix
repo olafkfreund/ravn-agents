@@ -3,7 +3,7 @@
 let
   inherit (lib)
     mkEnableOption mkPackageOption mkOption mkIf mkDefault types
-    optional optionalAttrs literalExpression;
+    optional optionals optionalAttrs literalExpression;
 
   cfg = config.services.ravn.agent;
 
@@ -304,6 +304,51 @@ in
         Must not contain secrets — the config lands in the Nix store.
       '';
     };
+
+    remediation = {
+      enable = mkEnableOption ''
+        supervised self-healing (#114/#115). When on, ravnd pulls signed
+        remediation commands from the control plane, verifies them against the
+        key pinned at enrollment, and relays them to the privileged
+        `ravn-actuator` over a local socket. ravnd itself stays unprivileged;
+        the actuator is the only privileged component. Opt-in by design'';
+
+      actuatorPackage = mkPackageOption pkgs "ravn-actuator" { };
+
+      commandSigningPublicKey = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "MCowBQYDK2VwAyEA...";
+        description = ''
+          Base64 Ed25519 *public* key the control plane signs commands with
+          (#114). The actuator verifies every command against it. Public — safe
+          to place in the Nix store. ravnd additionally pins this key at
+          enrollment; the actuator needs it independently.
+        '';
+      };
+
+      socketPath = mkOption {
+        type = types.str;
+        default = "/run/ravn/actuator.sock";
+        description = "Unix socket the actuator listens on and ravnd connects to.";
+      };
+
+      pollSecs = mkOption {
+        type = types.ints.positive;
+        default = 10;
+        description = "How often (seconds) ravnd polls the control plane for commands.";
+      };
+
+      apiToken = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Bearer token ravnd presents on the command endpoints (a P1 placeholder
+          until per-agent transport auth, #26). NOTE: lands in the Nix store —
+          use a non-sensitive token, or leave control-plane API auth disabled.
+        '';
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -312,7 +357,26 @@ in
         assertion = cfg.server.url != "";
         message = "services.ravn.agent.server.url must be set.";
       }
+      {
+        assertion = !cfg.remediation.enable || cfg.enrollment.endpoint != null;
+        message = ''
+          services.ravn.agent.remediation requires services.ravn.agent.enrollment.endpoint
+          (the control-plane HTTP base ravnd pulls commands from and pins its key at).
+        '';
+      }
+      {
+        assertion = !cfg.remediation.enable || cfg.remediation.commandSigningPublicKey != null;
+        message = ''
+          services.ravn.agent.remediation requires
+          services.ravn.agent.remediation.commandSigningPublicKey (the control plane's
+          base64 Ed25519 public key the actuator verifies commands against).
+        '';
+      }
     ];
+
+    # Shared group so the unprivileged ravnd can reach the actuator's socket
+    # (the actuator runs as root but with this group, so the socket is group-owned).
+    users.groups.ravn = mkIf cfg.remediation.enable { };
 
     # Translate the typed options into the agent's config file.
     services.ravn.agent.settings = {
@@ -457,8 +521,20 @@ in
 
         # Identity & state.
         DynamicUser = true;
-        # Read the journal for the journald and auth/SSH taps (#9, #12).
-        SupplementaryGroups = [ "systemd-journal" ];
+        # Read the journal for the journald and auth/SSH taps (#9, #12); join the
+        # `ravn` group to reach the actuator socket when remediation is on (#120).
+        SupplementaryGroups = [ "systemd-journal" ] ++ optional cfg.remediation.enable "ravn";
+
+        # Remediation pull (#114): opt-in, env-driven. ravnd reads the enrollment
+        # endpoint (the HTTP base) from its config file.
+        Environment = optionals cfg.remediation.enable (
+          [
+            "RAVN_REMEDIATION=1"
+            "RAVN_ACTUATOR_SOCKET=${cfg.remediation.socketPath}"
+            "RAVN_COMMAND_POLL_SECS=${toString cfg.remediation.pollSecs}"
+          ]
+          ++ optional (cfg.remediation.apiToken != null) "RAVN_API_TOKEN=${cfg.remediation.apiToken}"
+        );
         # Local SQLite offline buffer lives here (#21): /var/lib/ravn-agent.
         StateDirectory = "ravn-agent";
         StateDirectoryMode = "0700";
@@ -491,6 +567,59 @@ in
         SystemCallArchitectures = "native";
         SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
         UMask = "0077";
+      };
+    };
+
+    # The privileged actuator (#113/#120): the only privileged Ravn unit. Runs
+    # as root (to restart units) but with group `ravn`, so the socket it creates
+    # is group-owned and reachable by the unprivileged ravnd. It independently
+    # re-verifies each command's signature — the hard guarantee — so the socket
+    # permissions are defence-in-depth.
+    systemd.services.ravn-actuator = mkIf cfg.remediation.enable {
+      description = "Ravn privileged remediation actuator";
+      documentation = [ "https://github.com/olafkfreund/ravn-agents" ];
+      wantedBy = [ "multi-user.target" ];
+      before = [ "ravnd.service" ];
+
+      environment = {
+        RAVN_ACTUATOR_SOCKET = cfg.remediation.socketPath;
+        RAVN_COMMAND_PUBKEY = cfg.remediation.commandSigningPublicKey;
+      };
+
+      serviceConfig = {
+        ExecStart = lib.getExe cfg.remediation.actuatorPackage;
+        Restart = "on-failure";
+        RestartSec = 5;
+
+        # Root (needs to restart units) but group `ravn` → the socket is created
+        # group-owned, so ravnd (supplementary group `ravn`) can connect.
+        User = "root";
+        Group = "ravn";
+        RuntimeDirectory = "ravn";
+        RuntimeDirectoryMode = "0750";
+        UMask = "0007";
+
+        # Hardening. No network at all; it only speaks to systemd (D-Bus over
+        # AF_UNIX) and its own local socket. Minimal trusted computing base.
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectKernelLogs = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        RestrictRealtime = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        IPAddressDeny = "any";
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" ];
       };
     };
 

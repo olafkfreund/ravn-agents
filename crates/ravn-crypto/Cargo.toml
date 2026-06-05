@@ -1,0 +1,17 @@
+[package]
+name = "ravn-crypto"
+description = "Ed25519 signing and verification of Ravn command envelopes (#114). The single home for remediation crypto, so other crates depend on this — never on ed25519 directly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravn-core.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v7"] }

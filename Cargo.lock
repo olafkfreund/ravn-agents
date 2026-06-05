@@ -564,6 +564,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -659,6 +660,7 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
+ "pkcs8",
  "signature",
 ]
 
@@ -670,9 +672,12 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
+ "serde",
  "sha2",
  "signature",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2405,6 +2410,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ravn-actuator"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "nix",
+ "ravn-core",
+ "ravn-crypto",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "ravn-agent"
 version = "0.0.0"
 dependencies = [
@@ -2440,6 +2461,18 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "uuid",
+]
+
+[[package]]
+name = "ravn-crypto"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "rand 0.8.6",
+ "ravn-core",
  "uuid",
 ]
 

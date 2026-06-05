@@ -35,6 +35,10 @@ pub struct Config {
     /// Portal user authentication via OIDC + RBAC (#26). `Some` enables
     /// OIDC-bearer validation on the API (alongside the static dev tokens).
     pub oidc: Option<OidcConfig>,
+    /// Path to the Ed25519 remediation command signing key (#114).
+    /// `RAVN_COMMAND_KEY`. Generated and persisted (`0600`) if absent; when
+    /// unset entirely, an ephemeral key is used (dev only).
+    pub command_key_path: Option<String>,
 }
 
 /// Portal user OIDC + RBAC configuration (#26).
@@ -155,6 +159,7 @@ impl Config {
         let ingest_token_review = Self::token_review_from_env(&token)?;
         let inference = Self::inference_from_env(&token)?;
         let oidc = Self::oidc_from_env(&token)?;
+        let command_key_path = token("RAVN_COMMAND_KEY");
 
         Ok(Self {
             bind,
@@ -168,6 +173,7 @@ impl Config {
             ingest_token_review,
             inference,
             oidc,
+            command_key_path,
         })
     }
 

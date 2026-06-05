@@ -7,6 +7,7 @@
 mod api;
 mod auth;
 mod ca;
+mod command;
 mod config;
 mod db;
 mod inference;
@@ -134,6 +135,14 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    // Remediation command signing key (#114): its public key is advertised to
+    // agents at enrollment; the orchestrator (#115) signs commands with it.
+    let command_signer = std::sync::Arc::new(
+        command::CommandSigner::load_or_generate(config.command_key_path.as_deref())
+            .context("initializing the remediation command signing key")?,
+    );
+    let command_queue = std::sync::Arc::new(command::CommandQueue::default());
+
     let app_state = AppState {
         pool,
         nats,
@@ -148,6 +157,8 @@ async fn main() -> anyhow::Result<()> {
         inference,
         user_auth,
         oidc_public,
+        command_signer,
+        command_queue,
     };
 
     // Spawn the ingestion loops (events + heartbeats).

@@ -34,6 +34,10 @@ pub struct EnrollResponse {
     pub certificate_pem: String,
     /// PEM CA certificate the agent should trust/pin for the transport.
     pub ca_certificate_pem: String,
+    /// Base64 Ed25519 public key the control plane signs remediation commands
+    /// with (#114). The agent pins this and rejects any command whose signature
+    /// does not verify against it.
+    pub command_signing_pubkey: String,
     /// When the issued certificate expires.
     pub not_after: DateTime<Utc>,
 }

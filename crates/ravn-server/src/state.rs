@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::{IngestAuth, TokenReviewValidator, UserAuth};
 use crate::ca::Ca;
+use crate::command::{CommandQueue, CommandSigner};
 use crate::db::StoredEvent;
 use crate::inference::InferenceClient;
 use crate::metrics::Metrics;
@@ -51,4 +52,10 @@ pub struct AppState {
     pub user_auth: Option<Arc<UserAuth>>,
     /// Public OIDC settings served to the SPA at `/auth/config` (#26).
     pub oidc_public: Option<OidcPublic>,
+    /// Ed25519 signer for remediation commands; its public key is delivered to
+    /// agents at enrollment (#114).
+    pub command_signer: Arc<CommandSigner>,
+    /// Per-agent queue of signed commands awaiting pull, plus reported results
+    /// (#114). The orchestrator (#115) enqueues; agents pull and report.
+    pub command_queue: Arc<CommandQueue>,
 }

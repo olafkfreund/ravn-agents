@@ -12,6 +12,7 @@ mod config;
 mod db;
 mod inference;
 mod ingest;
+mod knowledge;
 mod metrics;
 mod remediation;
 mod state;
@@ -151,6 +152,13 @@ async fn main() -> anyhow::Result<()> {
     );
     let remediations = std::sync::Arc::new(remediation::RemediationStore::default());
 
+    // Remediation knowledge base (#118): per-env markdown wiki for deterministic
+    // recall + gap tracking. Disabled (no-op) when RAVN_KB_DIR is unset.
+    let knowledge = std::sync::Arc::new(
+        knowledge::KnowledgeBase::open(config.kb_dir.as_deref())
+            .context("opening the remediation knowledge base")?,
+    );
+
     let app_state = AppState {
         pool,
         nats,
@@ -169,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         command_queue,
         templates,
         remediations,
+        knowledge,
         command_ttl_secs: config.command_ttl_secs,
     };
 

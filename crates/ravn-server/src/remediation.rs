@@ -168,13 +168,21 @@ pub fn build_command(
 #[derive(Default)]
 pub struct RemediationStore {
     records: Mutex<Vec<RemediationRecord>>,
+    /// Fault signature per proposal id (#118), captured at insert time so the
+    /// knowledge base can be keyed off the original event once a result lands —
+    /// the closed record no longer carries the raw event payload.
+    signatures: Mutex<BTreeMap<Uuid, String>>,
 }
 
 impl RemediationStore {
     /// Insert a new pending proposal, unless an identical one is already pending
     /// (dedupe recurring faults — the detection tap re-emits a failed unit every
     /// few seconds). Returns the proposal id, or `None` if deduped.
-    pub fn insert(&self, proposal: RemediationProposal) -> Option<Uuid> {
+    ///
+    /// `fault_signature` is the deterministic signature of the triggering event
+    /// (#118), retained so the knowledge base can be updated when the result is
+    /// later reported.
+    pub fn insert(&self, proposal: RemediationProposal, fault_signature: String) -> Option<Uuid> {
         let mut records = self.records.lock().expect("remediation store poisoned");
         let dup = records.iter().any(|r| {
             matches!(r.decision, Decision::Pending)
@@ -186,6 +194,10 @@ impl RemediationStore {
             return None;
         }
         let id = proposal.id;
+        self.signatures
+            .lock()
+            .expect("remediation store poisoned")
+            .insert(id, fault_signature);
         records.push(RemediationRecord {
             proposal,
             decision: Decision::Pending,
@@ -229,15 +241,24 @@ impl RemediationStore {
         })
     }
 
-    /// Attach the agent-reported result to the record carrying `command_id`.
-    pub fn record_result(&self, result: ActionResult) -> bool {
+    /// Attach the agent-reported result to the record carrying `command_id`,
+    /// returning the now-closed record together with its fault signature (so
+    /// callers can reflect it into the knowledge base, #118). `None` if no record
+    /// matches the command.
+    pub fn record_result(&self, result: ActionResult) -> Option<(RemediationRecord, String)> {
         let mut records = self.records.lock().expect("remediation store poisoned");
-        if let Some(r) = records.iter_mut().find(|r| r.command_id == Some(result.command_id)) {
-            r.result = Some(result);
-            r.updated_at = Utc::now();
-            return true;
-        }
-        false
+        let r = records.iter_mut().find(|r| r.command_id == Some(result.command_id))?;
+        r.result = Some(result);
+        r.updated_at = Utc::now();
+        let record = r.clone();
+        let signature = self
+            .signatures
+            .lock()
+            .expect("remediation store poisoned")
+            .get(&record.proposal.id)
+            .cloned()
+            .unwrap_or_default();
+        Some((record, signature))
     }
 
     fn update(&self, id: Uuid, f: impl FnOnce(&mut RemediationRecord)) -> bool {
@@ -254,9 +275,19 @@ impl RemediationStore {
 /// Prepare hook, called best-effort after a message is persisted (#115). Matches
 /// a template, resolves parameters, and records a pending proposal. Never blocks
 /// or errors the ingestion path.
+///
+/// Two knowledge-base behaviours hang off this (#118): on a *matched* fault the
+/// proposal's rationale is biased with a deterministic recall note ("last N×
+/// this fired, template X succeeded"); on an *unmatched* fault a `gap` entry is
+/// written so operators can see which faults still need a template.
 pub fn prepare(state: &crate::state::AppState, message: &ravn_core::Message) {
     let event = &message.event;
-    let Some(template) = state.templates.match_event(event) else { return };
+    let signature = crate::knowledge::fault_signature(event);
+    let Some(template) = state.templates.match_event(event) else {
+        // No template for this fault — record a gap so the catalog can grow.
+        state.knowledge.record_gap(event);
+        return;
+    };
     let params = match resolve_params(template, event) {
         Ok(p) => p,
         Err(e) => {
@@ -265,8 +296,12 @@ pub fn prepare(state: &crate::state::AppState, message: &ravn_core::Message) {
         }
     };
     let template_id = template.id.clone();
-    let proposal = build_proposal(template, event, params);
-    if let Some(id) = state.remediations.insert(proposal) {
+    let mut proposal = build_proposal(template, event, params);
+    // Deterministic recall: surface past resolutions of this exact fault.
+    if let Some(note) = state.knowledge.recall(&signature) {
+        proposal.rationale = format!("{} {}", proposal.rationale, note);
+    }
+    if let Some(id) = state.remediations.insert(proposal, signature) {
         tracing::info!(proposal = %id, template = %template_id, host = %event.host, "remediation proposed");
     }
 }
@@ -349,7 +384,7 @@ mod tests {
         let proposal = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
         let store = RemediationStore::default();
 
-        let id = store.insert(proposal.clone()).expect("inserted");
+        let id = store.insert(proposal.clone(), "sig".into()).expect("inserted");
         assert!(store.pending_proposal(id).is_some());
 
         let command_id = Uuid::now_v7();
@@ -361,13 +396,15 @@ mod tests {
         ));
         assert!(store.pending_proposal(id).is_none(), "approved record is no longer pending");
 
-        assert!(store.record_result(ActionResult {
-            command_id,
-            status: ActionStatus::Succeeded,
-            detail: None,
-            observed_state: Some("active".into()),
-            finished_at: Utc::now(),
-        }));
+        assert!(store
+            .record_result(ActionResult {
+                command_id,
+                status: ActionStatus::Succeeded,
+                detail: None,
+                observed_state: Some("active".into()),
+                finished_at: Utc::now(),
+            })
+            .is_some());
         let rec = store.list().into_iter().find(|r| r.proposal.id == id).unwrap();
         assert!(matches!(rec.decision, Decision::Approved { .. }));
         assert_eq!(rec.result.unwrap().status, ActionStatus::Succeeded);
@@ -382,8 +419,8 @@ mod tests {
 
         let p1 = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
         let p2 = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
-        assert!(store.insert(p1).is_some());
-        assert!(store.insert(p2).is_none(), "identical pending proposal is deduped");
+        assert!(store.insert(p1, "sig".into()).is_some());
+        assert!(store.insert(p2, "sig".into()).is_none(), "identical pending proposal is deduped");
         assert_eq!(store.list().len(), 1);
     }
 
@@ -394,7 +431,7 @@ mod tests {
         let tpl = reg.match_event(&event).unwrap();
         let store = RemediationStore::default();
         let proposal = build_proposal(tpl, &event, resolve_params(tpl, &event).unwrap());
-        let id = store.insert(proposal).unwrap();
+        let id = store.insert(proposal, "sig".into()).unwrap();
         assert!(store.reject(id, "olaf".into(), Some("not now".into())));
         let rec = store.list().into_iter().next().unwrap();
         assert!(matches!(rec.decision, Decision::Rejected { .. }));

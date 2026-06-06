@@ -8,74 +8,66 @@ This is the public plan. Timings are **indicative for a part-time, open-source p
 and will move as people get involved — treat them as sequencing, not promises. Each
 milestone maps to one or more [epics](https://github.com/olafkfreund/ravn-agents/labels/epic).
 
-| Milestone | Theme | Indicative window |
-|-----------|-------|-------------------|
-| M0 | Walking skeleton (end-to-end thread) | Weeks 1–2 |
-| M1 | Detection + local inference | Weeks 3–6 |
-| M2 | Portal: inventory + live feed | Weeks 6–9 |
-| M3 | Topology view + categories | Weeks 9–11 |
-| M4 | Packaging (NixOS, OCI) + auth hardening | Weeks 11–14 |
-| M5 | Alert routing + commands + eval harness | Weeks 14–18 |
+| Milestone | Theme | Status |
+|-----------|-------|--------|
+| M0 | Walking skeleton (end-to-end thread) | ✅ Shipped |
+| M1 | Detection + local inference | ✅ Shipped |
+| M2 | Portal: inventory + live feed | ✅ Shipped |
+| M3 | Topology view + categories | ✅ Shipped |
+| M4 | Packaging (NixOS, OCI) + auth hardening | ✅ Shipped |
+| M5 | Kubernetes plane (controller + node-agent) | ✅ Shipped |
+| M6 | Supervised self-healing (PARR) | ✅ Shipped |
+| M7 | Alert routing + eval + dashboards | 🚧 Next |
 
-## M0 — Walking skeleton
+## ✅ M0–M3 — Skeleton, detection, portal, topology
 
-**What.** One real thread through all three planes: an agent emits a single event,
-the control plane persists it, the portal lists it.
+The foundation is in place and verified end to end: the Cargo workspace
+(`ravn-core`, `ravn-agent`, `ravn-server`), deterministic detection taps (journald,
+failed-unit over D-Bus, config drift, auth/SSH, NixOS generations), local LLM
+explanations, NATS transport with a SQLite offline buffer, and the React portal —
+fleet inventory, a live severity-coded event feed with a detail drawer, and the
+**topology view** that groups the fleet by a label of your choosing (now with a
+per-*kind* icon, so a cluster and a host read differently at a glance).
 
-**How.** Stand up the Cargo workspace (`ravn-core`, `ravn-agent`, `ravn-server`),
-define a minimal `Event` type, wire the agent to the server over plain WebSocket
-(NATS comes in M1), persist to Postgres, scaffold the React portal with a single
-inventory table.
+## ✅ M4 — Packaging + auth hardening
 
-**When.** First, ~1–2 weeks. Proof the shape works and the base everyone builds on.
+Deployable and safe by default: a Nix flake with `services.ravn.agent` and
+`services.ravn.controlPlane` modules, OCI images + docker-compose, hardened
+enrollment (bootstrap tokens → per-agent mTLS), portal user **OIDC + RBAC**, and
+systemd-sandboxed inference.
 
-## M1 — Detection + local inference
+## ✅ M5 — Kubernetes plane
 
-**What.** Real detection taps and real LLM explanations.
+Ravn watches Kubernetes the same way it watches hosts, detection-only: a read-only
+**controller** Deployment over the Events API and a node **DaemonSet** agent, with
+OIDC / TokenReview ingest auth, control-plane **inference for K8s events**, deploy
+manifests + a Helm chart, and a kind/k3d end-to-end test. Cluster signals and host
+signals share one `ravn-core` type system and read alike in the portal.
 
-**How.** journald, failed-unit (D-Bus), config-drift (inotify+hash), auth/SSH and
-NixOS-generation taps, normalised into `ravn-core` events. `llama-server` as a
-sandboxed systemd unit with a pinned Qwen3 1.7B model; reactive prompt template;
-SQLite offline buffer. Swap WebSocket for NATS.
+## ✅ M6 — Supervised self-healing (PARR)
 
-**When.** ~3–4 weeks after M0. Delivers the core product promise.
+The big one. Detection now closes the loop — under human control by default:
 
-## M2 — Portal: inventory + live feed
+- **Prepare / Act / Reflect / Review (PARR).** A detected fault is matched against a
+  curated, typed **remediation template**; the control plane *proposes* a fix.
+- **Approve → sign → act.** On approval the control plane issues an **Ed25519-signed**
+  command; the agent pulls it and a **privileged actuator** (privsep) carries it out.
+- **Safe by construction.** Default-deny policy engine + circuit breaker, an
+  **at-most-once** idempotency ledger, and verify/rollback. An optional policy can
+  auto-approve low-risk actions; a kill switch disables execution entirely.
+- **Knowledge base.** Retrospectives accumulate into per-environment markdown with
+  deterministic recall, so the fleet gets better at explaining itself over time.
 
-**What.** A usable operator UI.
+It runs on one machine via the [demo](https://github.com/olafkfreund/ravn-agents/blob/main/demo/README.md):
+a NixOS host, a k3d cluster, **GPU-accelerated** local explanations (AMD ROCm /
+NVIDIA / CPU), and a live `kill → propose → approve → heal` loop.
 
-**How.** Inventory (status, health, filter/search), a live message feed over
-WebSocket with severity coding and a detail drawer (raw event + explanation +
-suggested check), and per-agent detail/timeline. Tailwind + shadcn/ui.
-
-**When.** Overlaps the back half of M1; ~3 weeks.
-
-## M3 — Topology view + categories
-
-**What.** The category-grouped diagram showcase.
-
-**How.** Category model + API (user-defined tags, chosen grouping dimension), a React
-Flow canvas with agents as nodes grouped into category containers, elk/dagre layout,
-colour-coding, filter/search, and a category-management UI.
-
-**When.** ~2 weeks after M2.
-
-## M4 — Packaging + auth hardening
-
-**What.** Make it deployable and safe by default.
-
-**How.** Nix flake + `services.ravn.agent` and `services.ravn.controlPlane` modules;
-OCI images + docker-compose. Harden enrollment (bootstrap tokens → per-agent
-creds/mTLS), add user OIDC + RBAC, sandbox inference properly.
-
-**When.** ~3 weeks. The point where others can realistically run a fleet.
-
-## M5 — Alert routing + commands + eval
+## 🚧 M7 — Alert routing + eval + dashboards
 
 **What.** Production polish.
 
-**How.** External alert sinks (ntfy, webhook, email, Slack) with routing rules;
-push-commands to agents over NATS request/reply; a model-eval harness (tokens/sec +
-quality on target CPUs) and prompt-regression tests against golden fixtures.
-
-**When.** ~4 weeks. Beyond this: more detection taps, more models, dashboards.
+**How.** External alert sinks (ntfy, webhook, email, Slack) with routing rules by
+severity/category; a growing model-eval harness (tokens/sec + quality on target
+CPUs *and* GPUs) and prompt-regression tests against golden fixtures; richer portal
+dashboards. Beyond this: more detection taps, more remediation templates, more
+models.

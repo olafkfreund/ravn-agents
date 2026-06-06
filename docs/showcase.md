@@ -7,13 +7,14 @@ permalink: /showcase/
 # Ravn in action
 
 A working tour of the **Operator Console** — the live portal over the control
-plane — driven by real Kubernetes signals and explained in plain language by a
-small CPU-only model.
+plane — driven by real Kubernetes and host signals, explained in plain language by
+a small local model (CPU, or a GPU when you have one), with supervised self-healing.
 
 ![Ravn portal walkthrough]({{ '/assets/img/ravn-portal-demo.gif' | relative_url }})
 
 *A walkthrough of the live portal: the fleet event feed, an event opened to its
-AI explanation, the fleet inventory, and the grouped topology view.*
+AI explanation, the fleet inventory, the grouped topology view, and the
+self-healing remediations.*
 
 ---
 
@@ -67,10 +68,28 @@ sit alongside the local dev cluster.
 ![Fleet inventory]({{ '/assets/img/agents-fleet.png' | relative_url }})
 
 The **topology** view groups the same fleet by a category of your choosing
-(environment, region, team — whatever labels you attach), colour-coded by the
-most severe live event per node.
+(environment, region, team — whatever labels you attach), colour-coded by the most
+severe live event per node, with a per-*kind* icon so different things read
+differently. Here the one-box demo groups into a **☸ k3d cluster** (failing pods,
+red) and a **❄ NixOS host** (healthy, green):
 
-![Topology view]({{ '/assets/img/topology.png' | relative_url }})
+![Topology grouped into a k3d cluster and a NixOS host]({{ '/assets/img/topology.png' | relative_url }})
+
+---
+
+## It heals itself — with your approval
+
+Detection closes the loop. When a deterministic fault matches a curated template,
+the control plane proposes a fix; you approve it; the control plane signs an
+Ed25519 command; the agent's privileged actuator runs exactly that typed action and
+reports back — recorded at-most-once. The model is never in this path either.
+
+![Remediations: approve a proposed fix; a clean history of healed actions]({{ '/assets/img/remediations.png' | relative_url }})
+
+Kill a `flaky.service` on the demo host and watch it go
+`proposed → approved → succeeded (active)` in a few seconds — or let an
+auto-approve policy handle the low-risk ones. A default-deny gate, a circuit
+breaker, and a kill switch keep it safe.
 
 ---
 
@@ -82,8 +101,8 @@ renders.
 
 | Plane | What it is | Stack |
 | --- | --- | --- |
-| **Edge** | `ravnd` host agent + the Kubernetes controller & node-agent | Rust, deterministic taps, kube-rs informers, llama.cpp for the local last mile |
-| **Control plane** | `ravn-server` — ingest, persist, explain, serve | Rust (axum), NATS, Postgres (partitioned time-series), OpenAI-compatible inference client, Prometheus metrics |
+| **Edge** | `ravnd` host agent (+ a privileged actuator) and the Kubernetes controller & node-agent | Rust, deterministic taps, kube-rs informers, an OpenAI-compatible model (llama.cpp / Ollama, CPU or GPU) for the local last mile |
+| **Control plane** | `ravn-server` — ingest, persist, explain, propose + sign fixes, serve | Rust (axum), NATS, Postgres (partitioned time-series), OpenAI-compatible inference client, Ed25519 command signing, Prometheus metrics |
 | **Portal** | the Operator Console | React + React Flow, typed against the server's OpenAPI |
 
 **The guiding rule:** the LLM is *never* in the detection hot path. Deterministic
@@ -108,13 +127,21 @@ design.
 - **Kubernetes** — a workload **controller**, a node **DaemonSet** agent, OIDC /
   TokenReview ingest auth, control-plane **inference for K8s events**, deploy
   manifests + a Helm chart + OCI images, and a kind/k3d end-to-end test.
+- **Supervised self-healing** — a **PARR** loop (Prepare/Act/Reflect/Review):
+  curated remediation templates, **Ed25519-signed** commands, a **privileged
+  actuator** under privilege separation, an at-most-once ledger, a default-deny
+  policy + circuit breaker, verify/rollback, and a retrospective knowledge base.
+- **One-box demo** — a NixOS host, a k3d cluster, and **GPU-accelerated** local
+  explanations (AMD ROCm / NVIDIA / CPU), with a live `kill → propose → approve →
+  heal` loop — `scripts/demo-up.sh`.
 - **Observability & eval** — a model benchmark harness, prompt-regression
   fixtures, metrics, security hardening, and an end-to-end smoke test.
-- **Portal** — live event feed, fleet inventory, and a grouped topology view.
+- **Portal** — live event feed, fleet inventory, a grouped topology view (with
+  per-kind icons), and the **Remediations** approve/heal page.
 
 Everything above is verified end to end — including a real k3d cluster whose
-crashing pod's `BackOff` events flow through the controller, the control plane,
-and into Postgres.
+crashing pod's `BackOff` events flow through the controller, the control plane, and
+into Postgres, and a host unit that is killed, proposed, approved, and healed live.
 
 Browse the work, organised by epic with `good first issue` labels, on
 [GitHub](https://github.com/olafkfreund/ravn-agents), and follow the

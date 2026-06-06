@@ -6,6 +6,10 @@ Wants=network-online.target
 [Service]
 Environment=RAVN_SERVER_URL=nats://nats:4222
 Environment=RAVN_HOST=demo-nixos-host
+# Stable agent identity so re-deploys reuse the same topology node (and keep
+# their labels) instead of leaving offline duplicates — mirrors the k8s
+# controller's RAVN_CONTROLLER_ID.
+Environment=RAVN_AGENT_ID=01900000-0000-7000-8000-0000000000a1
 Environment=RAVN_JOURNALD=1
 # The host shares its kernel with the co-located k3d cluster in this all-in-one
 # demo, so skip raw kernel ring-buffer noise (OOM dumps, stack traces) — keep the

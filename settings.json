@@ -1,0 +1,20 @@
+{
+  "auto_remediation": false,
+  "risk_tier": "safe",
+  "inference_enabled": true,
+  "inference_endpoint": "http://127.0.0.1:15000",
+  "inference_model": "default",
+  "knowledge": {
+    "local_runbooks_dir": "/home/olafkfreund/Source/GitHub/ravn-agents/runbooks",
+    "github_wiki_dir": "/home/olafkfreund/Source/GitHub/ravn-agents/wiki",
+    "backstage_enabled": false,
+    "backstage_url": "",
+    "backstage_token": "",
+    "confluence_enabled": false,
+    "confluence_url": "",
+    "confluence_user": "",
+    "confluence_token": "",
+    "notion_enabled": false,
+    "notion_api_key": ""
+  }
+}

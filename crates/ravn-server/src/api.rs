@@ -629,6 +629,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/remediations/{id}/reject", axum::routing::post(reject_remediation))
         .route("/auth/config", get(auth_config))
         .route("/api/me", get(me))
+        .route("/api/settings", get(get_settings).put(put_settings))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 
@@ -637,6 +638,98 @@ pub fn router(state: AppState) -> Router {
         // Permissive CORS for the M0 dev portal (tighten before production).
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSettings {
+    #[serde(default)]
+    pub local_runbooks_dir: String,
+    #[serde(default)]
+    pub github_wiki_dir: String,
+    #[serde(default)]
+    pub backstage_enabled: bool,
+    #[serde(default)]
+    pub backstage_url: String,
+    #[serde(default)]
+    pub backstage_token: String,
+    #[serde(default)]
+    pub confluence_enabled: bool,
+    #[serde(default)]
+    pub confluence_url: String,
+    #[serde(default)]
+    pub confluence_user: String,
+    #[serde(default)]
+    pub confluence_token: String,
+    #[serde(default)]
+    pub notion_enabled: bool,
+    #[serde(default)]
+    pub notion_api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemSettings {
+    #[serde(default)]
+    pub auto_remediation: bool,
+    #[serde(default = "default_risk_tier")]
+    pub risk_tier: String,
+    #[serde(default)]
+    pub inference_enabled: bool,
+    #[serde(default = "default_inference_endpoint")]
+    pub inference_endpoint: String,
+    #[serde(default = "default_inference_model")]
+    pub inference_model: String,
+    #[serde(default)]
+    pub knowledge: Option<KnowledgeSettings>,
+}
+
+fn default_risk_tier() -> String { "safe".to_string() }
+fn default_inference_endpoint() -> String { "http://127.0.0.1:15000".to_string() }
+fn default_inference_model() -> String { "default".to_string() }
+
+fn get_settings_file_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("settings.json")
+}
+
+async fn get_settings() -> Result<Json<SystemSettings>, Response> {
+    let path = get_settings_file_path();
+    if !path.exists() {
+        return Ok(Json(SystemSettings {
+            auto_remediation: false,
+            risk_tier: default_risk_tier(),
+            inference_enabled: true,
+            inference_endpoint: default_inference_endpoint(),
+            inference_model: default_inference_model(),
+            knowledge: Some(KnowledgeSettings {
+                local_runbooks_dir: "/home/olafkfreund/Source/GitHub/ravn-agents/runbooks".to_string(),
+                github_wiki_dir: "/home/olafkfreund/Source/GitHub/ravn-agents/wiki".to_string(),
+                backstage_enabled: false,
+                backstage_url: "".to_string(),
+                backstage_token: "".to_string(),
+                confluence_enabled: false,
+                confluence_url: "".to_string(),
+                confluence_user: "".to_string(),
+                confluence_token: "".to_string(),
+                notion_enabled: false,
+                notion_api_key: "".to_string(),
+            }),
+        }));
+    }
+    let data = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to read settings file: {e}")).into_response())?;
+    let settings: SystemSettings = serde_json::from_str(&data)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to parse settings: {e}")).into_response())?;
+    Ok(Json(settings))
+}
+
+async fn put_settings(Json(settings): Json<SystemSettings>) -> Result<StatusCode, Response> {
+    let path = get_settings_file_path();
+    let data = serde_json::to_string_pretty(&settings)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to serialize settings: {e}")).into_response())?;
+    tokio::fs::write(&path, data)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to write settings file: {e}")).into_response())?;
+    Ok(StatusCode::OK)
 }
 
 #[cfg(test)]

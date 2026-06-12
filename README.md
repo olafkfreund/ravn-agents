@@ -1,45 +1,62 @@
 # Ravn
 
-**Small local-LLM agents that watch your Linux servers and report back in plain language.**
+**Self-hosted self-healing for Linux fleets — deterministic detection, signed and
+auditable remediation, and AI that explains but never decides.**
 
-Ravn is a fleet of lightweight agents — one per host — that watch logs, services,
-network, access, config drift and updates. Detection is deterministic and fast; a
-small CPU-only language model (e.g. Qwen3 1.7B) runs the *last mile*: it turns a
-flagged event into a clear, human-readable explanation and a suggested next check.
-A central control plane collects everything, and a modern web portal gives you fleet
-inventory, a live message feed, and a category-grouped topology view of your agents.
+Ravn watches your hosts and clusters — logs, services, network, access, config
+drift, updates — with fast, deterministic detection: rules you can read, not a
+statistical model you have to trust. When something breaks, Ravn matches the fault
+against pre-authored, reviewed remediation templates; a human (or a signed policy)
+approves; a tiny privileged actuator executes typed, whitelisted capabilities. Every
+command is Ed25519-signed, precondition-checked, verified after execution, and
+written to an audit trail. A small local language model runs the *last mile* only:
+turning a flagged event into a plain-language explanation and a suggested next
+check. It never decides that something is wrong, and it never decides what to run.
+
+Runs on **standalone Linux hosts**, on **Kubernetes**, and on **fully air-gapped
+networks** — the model is local (CPU is enough), so nothing ever has to leave your
+infrastructure.
 
 Named for the raven — Odin's scouts that fly out across the world and return to
 tell him what they saw.
 
-> Status: early development. We're building in the open. See the
-> [Roadmap](docs/roadmap.md) and come say hello in
+> Status: early development, building in the open. Some pieces are ahead of
+> others — the [Roadmap](docs/roadmap.md) says honestly what runs today and what
+> is still in flight. Come say hello in
 > [Discussions](https://github.com/olafkfreund/ravn-agents/discussions).
 
 ## Why Ravn
 
-- **The LLM is never in the detection hot path.** Deterministic tooling decides
-  *whether* something is wrong and fires the alarm. The model only writes the
-  *explanation*. A slow or wrong model degrades the wording, never the alerting.
-- **CPU-first.** Sub-2B models run comfortably on a server CPU. No GPU required,
-  near-zero idle cost — small enough to run on every box, not just one.
-- **Self-hosted and declarative.** Single static binaries, first-class NixOS
-  modules, OCI images for everywhere else.
+- **The LLM is never in the detection or action path.** Deterministic tooling
+  decides *whether* something is wrong; signed templates and policy decide *what
+  runs*. The model only writes the explanation. A slow or wrong model degrades
+  the wording — never the alerting, never the fix.
+- **Auditable by design.** Default-deny policy with risk tiers, Ed25519-signed
+  command envelopes, a privilege-separated actuator that re-verifies every
+  signature, circuit breakers, a fleet kill switch, and an audit record for every
+  proposal, approval, and outcome.
+- **Self-hosted everywhere.** Single static binaries, first-class NixOS modules,
+  OCI images, Kubernetes manifests. No SaaS dependency, no vendor lock-in, no
+  data leaving your network — air-gapped deployments are a supported target, not
+  an afterthought, because inference runs locally on CPU.
 
 ## Architecture at a glance
 
 Three planes:
 
-- **Edge** — `ravnd`, the agent on each host: detection taps + local inference.
-- **Control plane** — `ravn-server`: ingestion, storage, API.
-- **Portal** — the web UI: inventory, live messages, topology showcase.
+- **Edge** — `ravnd`, the agent on each host (plus a read-only controller per
+  Kubernetes cluster): detection taps, local inference, and a small privileged
+  actuator for approved fixes.
+- **Control plane** — `ravn-server`: ingestion, storage, policy, approvals, API.
+- **Portal** — the web UI: inventory, live messages, remediation approvals and
+  audit, topology.
 
 Full detail in [docs/architecture.md](docs/architecture.md).
 
 ## Roadmap
 
-What, how and when are laid out in [docs/roadmap.md](docs/roadmap.md), milestones
-M0 (walking skeleton) through M5 (alert routing + eval harness).
+What, how and when are laid out in [docs/roadmap.md](docs/roadmap.md) — including
+which parts of self-healing are shipped versus still in progress.
 
 ## Get involved
 

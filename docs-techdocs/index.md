@@ -1,14 +1,16 @@
 # Ravn
 
-**Small local-LLM agents that watch your Linux/NixOS hosts and Kubernetes, report
-in plain language, and — with supervision — heal themselves.**
+**Self-hosted self-healing for Linux fleets — deterministic detection, signed and
+auditable remediation, and AI that explains but never decides.**
 
-Ravn is a fleet of lightweight agents (one per host) that watch logs, services,
-network, access, config drift and updates. Detection is deterministic and fast; a
-small CPU-only language model runs the *last mile*, turning a flagged event into a
-clear, human-readable explanation and a suggested next check. A central control
-plane collects everything, a portal gives you inventory, a live feed and a
-topology view, and a supervised remediation loop can fix recurring faults.
+Ravn watches hosts and clusters — logs, services, network, access, config drift,
+updates — with fast, deterministic detection: rules you can read, not a model you
+have to trust. Faults are matched against pre-authored remediation templates; a
+human (or signed policy) approves; a privilege-separated actuator executes typed,
+whitelisted capabilities with Ed25519-signed commands and a full audit trail. A
+small local language model runs the *last mile* only, turning flagged events into
+plain-language explanations. Runs on standalone Linux hosts, Kubernetes, and
+fully air-gapped networks — inference is local and CPU-only.
 
 !!! info "This is the TechDocs view"
     This site is generated for Backstage from the repository. The public

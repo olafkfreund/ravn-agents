@@ -13,8 +13,9 @@
 # file tree, so newly added docs appear without editing this file.
 site_name: Ravn
 site_description: >-
-  Small local-LLM agents that watch Linux/NixOS hosts and Kubernetes and report
-  in plain language, with a control plane, a portal, and supervised self-healing.
+  Self-hosted self-healing for Linux fleets — deterministic detection, signed
+  and auditable remediation, and AI that explains but never decides. Runs on
+  hosts, Kubernetes, and air-gapped networks.
 docs_dir: docs-techdocs
 repo_url: https://github.com/olafkfreund/ravn-agents
 edit_uri: edit/main/docs-techdocs/

@@ -1,7 +1,8 @@
 title: Ravn
 description: >-
-  Small local-LLM agents that watch your Linux servers and report back in
-  plain language.
+  Self-hosted self-healing for Linux fleets — deterministic detection, signed
+  and auditable remediation, and AI that explains but never decides. Runs on
+  hosts, Kubernetes, and air-gapped networks.
 url: "https://olafkfreund.github.io"
 baseurl: "/ravn-agents"
 

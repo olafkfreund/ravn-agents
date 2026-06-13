@@ -46,6 +46,9 @@ pub enum Source {
     KubeWorkload,
     /// Kubernetes node-level signal from the DaemonSet agent (#54).
     KubeNode,
+    /// Synthetic event emitted by the control plane itself for self-observability
+    /// (#149): circuit-breaker trips, kill-switch activations, etc.
+    RavnInternal,
 }
 
 /// A normalized detection event.

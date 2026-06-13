@@ -8,6 +8,7 @@ members = [
   "crates/ravn-actuator",
   "crates/ravn-eval",
   "crates/ravn-k8s",
+  "crates/ravn-mcp",
 ]
 
 [workspace.package]

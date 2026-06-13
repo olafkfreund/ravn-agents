@@ -9,7 +9,10 @@ risk_tier = "safe"
 
 [match]
 source = "failed_unit"
-conditions = { active_state = "failed" }
+# payload.result is the systemd result string reported by the D-Bus tap (#10).
+# Matching on "exit-code" limits this template to the most common failure mode;
+# remove the condition to catch all failed-unit events regardless of exit reason.
+conditions = { "payload.result" = "exit-code" }
 
 [parameters]
 unit = { type = "string", from = "payload.unit" }

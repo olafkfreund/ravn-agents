@@ -1,0 +1,98 @@
+# Ravn control-plane quickstart — docker-compose
+#
+# Brings up the full control plane (ravn-server + NATS + Postgres) on a
+# single machine.  The host agent (ravnd) runs as a bare binary with the
+# unit file in dist/systemd/ravnd.service — it does NOT run inside Docker
+# because it needs direct access to systemd/journald on the host.
+#
+# Usage:
+#   docker compose -f docker-compose.quickstart.yml up -d
+#
+# Then follow docs/host-quickstart.md for the agent install + enrollment steps.
+#
+# Host ports are intentionally uncommon to avoid clashing with services you
+# may already run.  Internal services are not exposed.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ravn
+      POSTGRES_PASSWORD: ravn      # change in production; use a secret
+      POSTGRES_DB: ravn
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ravn"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    command: ["--jetstream", "--http_port", "8222"]
+    # NATS monitoring port — remove if you don't need it.
+    ports:
+      - "18222:8222"
+
+  ravn-server:
+    # Use the official release image if published; otherwise build locally.
+    # image: ghcr.io/olafkfreund/ravn-agents/ravn-server:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["ravn-server"]
+    restart: unless-stopped
+    environment:
+      RAVN_BIND: "0.0.0.0:8080"
+      DATABASE_URL: "postgres://ravn:ravn@postgres:5432/ravn"
+      NATS_URL: "nats://nats:4222"
+      RUST_LOG: "info"
+      # --- Enrollment (optional but recommended) ---
+      # Generate a CA and token before first boot; see docs/host-quickstart.md.
+      # RAVN_CA_CERT: /run/secrets/ca_cert
+      # RAVN_CA_KEY:  /run/secrets/ca_key
+      # RAVN_ENROLL_TOKEN_FILE: /run/secrets/enroll_token
+      # RAVN_CERT_TTL_DAYS: "90"
+    # secrets:
+    #   - ca_cert
+    #   - ca_key
+    #   - enroll_token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    ports:
+      - "18090:8080"   # control-plane REST API — used by ravnd and the portal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  portal:
+    build:
+      context: ../..
+      dockerfile: docker/portal.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "18088:80"     # Ravn portal UI
+    depends_on:
+      ravn-server:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+
+# --- Uncomment to supply enrollment secrets via Docker Swarm secrets or
+#     individual files on disk.
+# secrets:
+#   ca_cert:
+#     file: ./secrets/ca.crt
+#   ca_key:
+#     file: ./secrets/ca.key
+#   enroll_token:
+#     file: ./secrets/enroll-token.txt

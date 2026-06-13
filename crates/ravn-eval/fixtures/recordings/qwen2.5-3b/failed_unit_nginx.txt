@@ -1,0 +1,1 @@
+{"explanation": "nginx.service on web-01 failed (result: exit-code). The journal shows nginx could not bind() to 0.0.0.0:80 because the address is already in use, meaning another process is already listening on port 80. nginx will keep failing until that port is freed.", "suggested_check": "ss -ltnp | grep ':80'"}

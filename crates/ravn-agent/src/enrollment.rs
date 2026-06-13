@@ -87,9 +87,19 @@ pub async fn ensure_enrolled(config: &Config) -> Result<Option<Identity>> {
     std::fs::write(&id.ca_path, &enrolled.ca_certificate_pem)
         .with_context(|| format!("writing {}", id.ca_path.display()))?;
     // Pin the control plane's command-signing public key (#114): the agent
-    // rejects any remediation command that does not verify against it.
+    // rejects any remediation command that does not verify against it. Kept for
+    // backward compatibility / as the rotation fallback.
     std::fs::write(config.cred_dir.join("command_pubkey.b64"), &enrolled.command_signing_pubkey)
         .with_context(|| format!("writing command_pubkey.b64 in {}", config.cred_dir.display()))?;
+    // Pin the full command-signing keyring (#150) when the control plane provides
+    // one: the active key plus any previous keys inside a rotation overlap window.
+    // The remediation pull loop refreshes this on each check-in, so a key rotates
+    // with no re-enrollment. An older control plane sends an empty string here —
+    // the agent then relies on the single pinned key above.
+    if !enrolled.command_keyring.is_empty() {
+        std::fs::write(config.cred_dir.join("command_keyring.json"), &enrolled.command_keyring)
+            .with_context(|| format!("writing command_keyring.json in {}", config.cred_dir.display()))?;
+    }
 
     tracing::info!(
         agent_id = %config.agent_id,

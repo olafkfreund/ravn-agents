@@ -1,0 +1,1 @@
+{"explanation": "A unit on the host stopped working. The most common reason for this is that the disk is full or a network connection was lost. Please investigate the situation and take appropriate action.", "suggested_check": "check the system"}

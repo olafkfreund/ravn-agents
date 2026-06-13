@@ -1,0 +1,81 @@
+# ravn-server.service — Ravn control plane (non-NixOS host install)
+#
+# Hardening directives mirror the NixOS module at nixos/modules/control-plane.nix
+# (services.ravn.controlPlane.serviceConfig block) exactly.
+#
+# In a typical deployment the control plane runs in docker-compose (see
+# dist/docker-compose/docker-compose.quickstart.yml) rather than as a bare
+# binary.  This unit file covers the case where you want to run it directly
+# on a server, e.g. behind nginx.
+#
+# Prerequisites (managed by you, not this unit):
+#   • PostgreSQL ≥ 15 with a database/user "ravn" already created
+#   • NATS ≥ 2.10 with JetStream enabled
+#
+# Installation:
+#   sudo install -m 644 ravn-server.service /etc/systemd/system/
+#   sudo useradd -r -s /sbin/nologin -G ravn ravn
+#   sudo install -m 755 /path/to/ravn-server /usr/local/bin/ravn-server
+#   sudo install -m 640 -o root -g ravn /path/to/ravn-server.env /etc/ravn/server.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ravn-server.service
+
+[Unit]
+Description=Ravn control plane
+Documentation=https://github.com/olafkfreund/ravn-agents
+After=network-online.target postgresql.service nats.service
+Wants=network-online.target
+
+[Service]
+# ---- Binary ----
+ExecStart=/usr/local/bin/ravn-server
+Restart=on-failure
+RestartSec=5
+
+# ---- Identity & state ----
+# Fixed user so PostgreSQL peer-auth maps to the "ravn" role.
+User=ravn
+Group=ravn
+StateDirectory=ravn-server
+
+# ---- Environment ----
+# All tunables are environment-driven (no config file).  Put secrets in the
+# env file with mode 0640 owned root:ravn — never world-readable.
+EnvironmentFile=/etc/ravn/server.env
+# Minimum variables the env file must define:
+#   RAVN_BIND=127.0.0.1:8080
+#   DATABASE_URL=postgres://ravn@/ravn?host=/run/postgresql
+#   NATS_URL=nats://127.0.0.1:4222
+#   RUST_LOG=info
+# Optional enrollment variables (when enrollment is enabled):
+#   RAVN_CA_CERT=/etc/ravn/ca.crt
+#   RAVN_CA_KEY=/run/secrets/ravn-ca-key
+#   RAVN_ENROLL_TOKEN_FILE=/run/secrets/ravn-bootstrap-token
+#   RAVN_CERT_TTL_DAYS=90
+
+# ---- Hardening (mirrors nixos/modules/control-plane.nix) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged ~@resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

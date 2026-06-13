@@ -1,0 +1,8 @@
+{
+  "category": "failed_unit",
+  "reference_explanation": "nginx.service on web-01 failed with an exit-code result because it could not bind to 0.0.0.0:80 — the address is already in use, so another process already holds port 80. Until that conflict is resolved nginx will keep failing to start.",
+  "must_mention": ["nginx.service", "web-01", "exit-code", "80", "bind"],
+  "forbidden": ["out of memory", "oom", "disk full", "segfault", "certificate", "dns", "permission denied"],
+  "expected_check": "ss -ltnp sport = :80",
+  "check_keywords": ["ss", "80"]
+}

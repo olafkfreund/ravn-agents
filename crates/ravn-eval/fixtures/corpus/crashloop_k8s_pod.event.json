@@ -1,0 +1,20 @@
+{
+  "id": "019ed100-1000-7000-8000-000000000006",
+  "occurred_at": "2026-05-01T12:20:05Z",
+  "observed_at": "2026-05-01T12:20:06Z",
+  "agent_id": "019ed100-0000-7000-8000-0000000000aa",
+  "host": "node-gke-1",
+  "severity": "error",
+  "title": "CrashLoopBackOff: payments/worker-5f8b",
+  "category_hints": ["kubernetes"],
+  "payload": {
+    "kind": "kube_workload",
+    "namespace": "payments",
+    "object_kind": "Pod",
+    "name": "worker-5f8b",
+    "reason": "CrashLoopBackOff",
+    "message": "Back-off restarting failed container worker in pod worker-5f8b",
+    "count": 9,
+    "container": "worker"
+  }
+}

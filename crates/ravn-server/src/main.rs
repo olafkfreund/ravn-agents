@@ -32,6 +32,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     init_tracing(&config);
 
+    if config::is_airgapped() {
+        tracing::info!(
+            "RAVN_AIRGAPPED=1 — air-gapped mode active: \
+             all JWKS documents must be local files; outbound JWKS URL fetches are blocked"
+        );
+    }
+
     // Database: connect and migrate before serving.
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
@@ -141,8 +148,11 @@ async fn main() -> anyhow::Result<()> {
     // Remediation command signing key (#114): its public key is advertised to
     // agents at enrollment; the orchestrator (#115) signs commands with it.
     let command_signer = std::sync::Arc::new(
-        command::CommandSigner::load_or_generate(config.command_key_path.as_deref())
-            .context("initializing the remediation command signing key")?,
+        command::CommandSigner::load_or_generate_with_previous(
+            config.command_key_path.as_deref(),
+            config.command_previous_keys_dir.as_deref(),
+        )
+        .context("initializing the remediation command signing key")?,
     );
     let command_queue = std::sync::Arc::new(command::CommandQueue::default());
 
@@ -151,7 +161,13 @@ async fn main() -> anyhow::Result<()> {
         remediation::TemplateRegistry::load_dir(std::path::Path::new(&config.templates_dir))
             .context("loading remediation templates")?,
     );
-    let remediations = std::sync::Arc::new(remediation::RemediationStore::default());
+    // Durable remediation store (#143): backed by Postgres; rebuilds the
+    // in-memory dedup cache from any rows that survived the previous run.
+    let remediations = std::sync::Arc::new(
+        remediation::RemediationStore::new(pool.clone())
+            .await
+            .context("initialising the remediation audit store")?,
+    );
 
     // Remediation knowledge base (#118): per-env markdown wiki for deterministic
     // recall + gap tracking. Disabled (no-op) when RAVN_KB_DIR is unset.
@@ -187,13 +203,21 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(config.policy.auto_window_secs),
     ));
 
+    let metrics = {
+        let m = metrics::Metrics::new();
+        // #149: initialise kill-switch gauge at startup so it is visible in
+        // Grafana from the first scrape (1 = kill switch on / auto disabled).
+        m.kill_switch_active.set(if config.policy.auto_enabled { 0 } else { 1 });
+        std::sync::Arc::new(m)
+    };
+
     let app_state = AppState {
         pool,
         nats,
         events_tx,
         admin_token: config.admin_token.clone(),
         viewer_token: config.viewer_token.clone(),
-        metrics: std::sync::Arc::new(metrics::Metrics::new()),
+        metrics,
         ca,
         enroll_token,
         ingest_auth,
@@ -250,7 +274,20 @@ async fn build_user_auth(cfg: &OidcConfig) -> anyhow::Result<UserAuth> {
 }
 
 /// Load a JWKS document from a URL (fetched at startup) or a local file.
+///
+/// When `RAVN_AIRGAPPED=1` is set the URL variant is rejected at startup rather
+/// than silently making an outbound HTTPS call — the operator must supply the
+/// JWKS as a local file (`RAVN_OIDC_JWKS_FILE` / `RAVN_INGEST_OIDC_JWKS_FILE`).
 async fn load_jwks(source: &JwksSource) -> anyhow::Result<String> {
+    if crate::config::is_airgapped() {
+        if let JwksSource::Url(url) = source {
+            anyhow::bail!(
+                "RAVN_AIRGAPPED=1 is set but JWKS source is a URL ({url}). \
+                 In air-gapped mode all JWKS documents must be provided as local \
+                 files (RAVN_OIDC_JWKS_FILE / RAVN_INGEST_OIDC_JWKS_FILE)."
+            );
+        }
+    }
     match source {
         JwksSource::Url(url) => reqwest::get(url)
             .await

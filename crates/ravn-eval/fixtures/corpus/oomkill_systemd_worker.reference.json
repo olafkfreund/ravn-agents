@@ -1,0 +1,8 @@
+{
+  "category": "oom_kill",
+  "reference_explanation": "ingest-worker.service on worker-03 was terminated by the kernel OOM killer (result oom-kill): the process grew to roughly 2GB of memory and the kernel reclaimed it to keep the host alive. This points at a memory leak or an unbounded workload rather than a crash bug, and the unit will be restarted only to be killed again under the same load.",
+  "must_mention": ["ingest-worker.service", "worker-03", "oom-kill", "memory"],
+  "forbidden": ["disk full", "port", "address already in use", "certificate expired", "permission denied", "network"],
+  "expected_check": "journalctl -u ingest-worker.service -b | grep -i oom",
+  "check_keywords": ["journalctl", "ingest-worker"]
+}

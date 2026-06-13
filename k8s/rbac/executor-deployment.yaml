@@ -1,0 +1,85 @@
+# Deployment for ravn-k8s-executor (#146)
+#
+# Runs the executor as a separate Deployment in `ravn-system`. An alternative
+# is to run it as a sidecar alongside the controller, but a separate Deployment
+# keeps the privilege boundary clear: only the executor pod holds the
+# pod-delete / deployment-patch RBAC grants.
+#
+# Before applying, create the Secret with the Ed25519 public key:
+#
+#   kubectl create secret generic ravn-verifying-key \
+#     --namespace ravn-system \
+#     --from-literal=key="<base64-encoded Ed25519 public key>"
+#
+# The key is the control plane's *public* verifying key — it contains no
+# secret material and could equally live in a ConfigMap, but a Secret keeps
+# the manifest consistent with how the host actuator is provisioned.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ravn-k8s-executor
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/name: ravn-k8s-executor
+    app.kubernetes.io/part-of: ravn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ravn-k8s-executor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ravn-k8s-executor
+        app.kubernetes.io/part-of: ravn
+    spec:
+      serviceAccountName: ravn-k8s-executor
+      # No automounted SA token beyond what kube-rs needs for in-cluster auth.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534        # nobody
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: executor
+          image: ghcr.io/olafkfreund/ravn-k8s-executor:latest  # replace with actual image
+          args: []
+          env:
+            - name: RAVN_EXECUTOR_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid     # stable pod UID as agent identity
+            - name: RAVN_CLUSTER
+              value: "ravn-dev"               # override per environment
+            - name: NATS_URL
+              value: "nats://nats.ravn-system.svc.cluster.local:4222"
+            - name: RAVN_VERIFYING_KEY_FILE
+              value: "/etc/ravn/verifying-key"
+            - name: RAVN_LOG
+              value: "info"
+          volumeMounts:
+            - name: verifying-key
+              mountPath: /etc/ravn
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: verifying-key
+          secret:
+            secretName: ravn-verifying-key
+            items:
+              - key: key
+                path: verifying-key
+      restartPolicy: Always

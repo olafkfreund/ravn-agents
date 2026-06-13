@@ -215,3 +215,30 @@ export async function approveRemediation(id: string): Promise<void> {
 export async function rejectRemediation(id: string): Promise<void> {
   await remediationFetch(`/api/remediations/${id}/reject`, { method: "POST" });
 }
+
+// ── System health / self-observability (#149) ──────────────────────────────
+
+/** Self-observability snapshot from /api/system/health. */
+export interface SystemHealth {
+  kill_switch_active: boolean;
+  inference_configured: boolean;
+  circuit_breaker_trips_total: number;
+  remediation_outcomes: Record<string, number>;
+  inference_timeouts_total: number;
+  command_channel_errors_total: number;
+}
+
+/** Fetch the system health snapshot. Returns null when the endpoint is absent
+ *  (older control planes) so the caller can silently skip the banner. */
+export async function getSystemHealth(): Promise<SystemHealth | null> {
+  const token = getToken();
+  try {
+    const res = await fetch("/api/system/health", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SystemHealth;
+  } catch {
+    return null;
+  }
+}

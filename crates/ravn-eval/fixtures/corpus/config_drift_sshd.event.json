@@ -1,0 +1,17 @@
+{
+  "id": "019ed100-1000-7000-8000-000000000005",
+  "occurred_at": "2026-05-01T10:05:44Z",
+  "observed_at": "2026-05-01T10:05:44Z",
+  "agent_id": "019ed100-0000-7000-8000-0000000000aa",
+  "host": "web-01",
+  "severity": "notice",
+  "title": "config changed: /etc/ssh/sshd_config",
+  "category_hints": ["config", "ssh", "security"],
+  "payload": {
+    "kind": "config_drift",
+    "path": "/etc/ssh/sshd_config",
+    "old_hash": "sha256:6b1c0e2a9f4d8b3c7e1a5d9f0b2c4e6a8d0f2b4c6e8a0c2e4f6a8c0e2b4d6f80",
+    "new_hash": "sha256:11ffaa22bb33cc44dd55ee66ff7788990011223344556677889900aabbccddee",
+    "diff": "--- a/etc/ssh/sshd_config\n+++ b/etc/ssh/sshd_config\n@@ -32,7 +32,7 @@\n-PermitRootLogin no\n+PermitRootLogin yes\n PasswordAuthentication no\n"
+  }
+}

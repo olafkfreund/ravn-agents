@@ -1,8 +1,11 @@
 name: VM e2e
 
-# The self-healing remediation loop's end-to-end NixOS VM test (#121). It boots a
-# full stack (control plane + agent + privileged actuator) under QEMU, so it's
-# slow — kept out of the gating `nix flake check` and run here on its own.
+# NixOS VM end-to-end tests.  Both tests boot a full stack under QEMU and are
+# deliberately excluded from `nix flake check` (slow under emulation).
+#
+# Jobs:
+#   remediation-e2e  — the standard self-healing loop (#121)
+#   airgapped-e2e    — identical heal loop with outbound networking blocked (#153)
 
 on:
   push:
@@ -35,3 +38,23 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build + run the remediation VM test
         run: nix build .#remediation-e2e -L
+
+  airgapped-e2e:
+    name: air-gapped e2e (NixOS VM, no outbound network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # The air-gapped VM test (#153):
+      #   - removes the default gateway inside the VM before starting any service
+      #   - sets RAVN_AIRGAPPED=1 on ravn-server
+      #   - applies iptables OUTPUT DROP for non-loopback traffic
+      #   - runs the full signed heal loop (fail unit → propose → approve → healed)
+      #   - asserts zero established connections to non-loopback peers after the run
+      #
+      # Inference is DISABLED in this job (no model weights in CI).  A separate
+      # manual job below covers the inference path when a model is available.
+      - name: Build + run the air-gapped VM test
+        run: nix build .#airgapped-e2e -L

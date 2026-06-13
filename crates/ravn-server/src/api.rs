@@ -250,6 +250,60 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+/// Self-observability health snapshot (#149).
+///
+/// Returns the current kill-switch state, recent circuit-breaker trip count,
+/// inference health (whether the client is configured), and command-channel
+/// error count. Polled by the portal banner — lightweight (no DB).
+#[derive(Debug, Serialize)]
+pub struct SystemHealth {
+    /// Whether the global auto-remediation kill switch is active (true = auto disabled).
+    pub kill_switch_active: bool,
+    /// Inference client is configured (true) or disabled (false).
+    pub inference_configured: bool,
+    /// Total circuit-breaker trips since startup.
+    pub circuit_breaker_trips_total: u64,
+    /// Total remediation outcomes by status since startup.
+    pub remediation_outcomes: std::collections::BTreeMap<String, u64>,
+    /// Total inference timeouts since startup.
+    pub inference_timeouts_total: u64,
+    /// Total command-channel errors since startup.
+    pub command_channel_errors_total: u64,
+}
+
+async fn system_health(State(state): State<AppState>) -> Json<SystemHealth> {
+    // Collect counter values from the Prometheus metric families.
+    use prometheus::core::Collector;
+
+    let breaker_trips = state.metrics.circuit_breaker_trips.get();
+    let inference_timeouts = state.metrics.inference_timeouts.get();
+    let command_errors = state.metrics.command_channel_errors.get();
+    let kill_switch = state.metrics.kill_switch_active.get() == 1;
+
+    // Gather remediation_outcomes label values.
+    let mut outcomes = std::collections::BTreeMap::new();
+    for mf in state.metrics.remediation_outcomes.collect() {
+        for m in mf.get_metric() {
+            let status = m
+                .get_label()
+                .iter()
+                .find(|lp| lp.get_name() == "status")
+                .map(|lp| lp.get_value().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            outcomes.insert(status, m.get_counter().get_value() as u64);
+        }
+    }
+
+    Json(SystemHealth {
+        kill_switch_active: kill_switch,
+        inference_configured: state.inference.is_some(),
+        circuit_breaker_trips_total: breaker_trips,
+        remediation_outcomes: outcomes,
+        inference_timeouts_total: inference_timeouts,
+        command_channel_errors_total: command_errors,
+    })
+}
+
 /// Prometheus metrics in text exposition format (#40). Public.
 async fn metrics(State(state): State<AppState>) -> Response {
     if let Ok(agents) = db::list_agents(&state.pool).await {
@@ -309,9 +363,28 @@ async fn enroll(
         certificate_pem,
         ca_certificate_pem: ca.ca_cert_pem().to_string(),
         command_signing_pubkey: state.command_signer.pubkey_b64().to_string(),
+        command_keyring: state.command_signer.keyring_json().to_string(),
         not_after,
     })
     .into_response()
+}
+
+/// Publish the current command-signing keyring (#150): the active key plus any
+/// previous keys still inside a rotation overlap window. Agents fetch this on
+/// each check-in and re-pin it, so a key rotates with zero verification failures
+/// and no re-enrollment.
+///
+/// Auth: behind the API's bearer middleware, the same authenticated channel the
+/// command pull uses. The document contains only *public* keys — no secret is
+/// exposed — but serving it under auth keeps an unauthenticated party from
+/// learning the fleet's trust set. The response is signed-key material the agent
+/// only ever uses to *verify*, never to sign.
+async fn get_command_keys(State(state): State<AppState>) -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.command_signer.keyring_json().to_string(),
+    )
+        .into_response()
 }
 
 /// Pull pending remediation commands for an agent (#114). The agent long-polls
@@ -337,8 +410,16 @@ async fn post_command_result(
     Json(result): Json<ravn_core::ActionResult>,
 ) -> StatusCode {
     tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
-    // Close the matching remediation record (#115), and keep the raw result.
-    if let Some((record, signature)) = state.remediations.record_result(result.clone()) {
+    // #149: record the outcome metric before anything else so even a partial
+    // result is counted. The status is the wire string (e.g. "succeeded").
+    let status_str = serde_json::to_value(result.status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    state.metrics.record_remediation_outcome(&status_str);
+
+    // Close the matching remediation record (#115), persist to Postgres (#143).
+    if let Some((record, signature)) = state.remediations.record_result(result.clone()).await {
         // Reflect the outcome into the knowledge base (#118): create or update
         // the per-fault entry so future occurrences recall this resolution.
         if state.knowledge.is_enabled() && !signature.is_empty() {
@@ -367,19 +448,20 @@ async fn post_command_result(
 }
 
 /// List remediation records — pending proposals plus decided/executed history
-/// (#115). Drives the portal approval queue (#119).
+/// (#115). Drives the portal approval queue (#119). Reads from Postgres (#143).
 async fn list_remediations(State(state): State<AppState>) -> Json<Vec<ravn_core::RemediationRecord>> {
-    Json(state.remediations.list())
+    Json(state.remediations.list().await)
 }
 
 /// Approve a pending remediation (#115): sign a command for the proposal and
 /// enqueue it for the agent to pull. Mutating → requires admin (RBAC).
+/// Writes the approval to Postgres (#143).
 async fn approve_remediation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     role: Option<axum::Extension<Role>>,
 ) -> Response {
-    let Some(proposal) = state.remediations.pending_proposal(id) else {
+    let Some(proposal) = state.remediations.pending_proposal(id).await else {
         return (StatusCode::NOT_FOUND, "no pending remediation with that id").into_response();
     };
     let Some(template) = state.templates.get(&proposal.template_id) else {
@@ -403,17 +485,21 @@ async fn approve_remediation(
     let command_id = envelope.command_id;
     let signature = envelope.sig.clone();
     state.command_queue.enqueue(envelope);
-    state.remediations.approve(
-        id,
-        ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() },
-        command_id,
-        signature,
-    );
+    state
+        .remediations
+        .approve(
+            id,
+            ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() },
+            command_id,
+            signature,
+        )
+        .await;
     tracing::info!(remediation = %id, %command_id, "remediation approved; command enqueued");
     Json(serde_json::json!({ "approved": true, "command_id": command_id })).into_response()
 }
 
 /// Reject a pending remediation (#115). Mutating → requires admin (RBAC).
+/// Writes the rejection to Postgres (#143).
 async fn reject_remediation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -423,7 +509,7 @@ async fn reject_remediation(
         Role::Admin => "admin",
         Role::Viewer => "viewer",
     };
-    if state.remediations.reject(id, user.to_string(), None) {
+    if state.remediations.reject(id, user.to_string(), None).await {
         Json(serde_json::json!({ "rejected": true })).into_response()
     } else {
         (StatusCode::NOT_FOUND, "no remediation with that id").into_response()
@@ -495,7 +581,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Endpoints reachable without auth even when tokens are configured.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ready" | "/metrics" | "/enroll" | "/ingest" | "/auth/config")
+    matches!(
+        path,
+        "/ready" | "/metrics" | "/enroll" | "/ingest" | "/auth/config" | "/api/system/health"
+    )
 }
 
 /// The caller's resolved role (#26), for role-aware portal UI. Behind auth, so
@@ -624,12 +713,14 @@ pub fn router(state: AppState) -> Router {
         .route("/ingest", axum::routing::post(ingest))
         .route("/agents/{id}/commands", get(get_commands))
         .route("/agents/{id}/commands/{cmd}/result", axum::routing::post(post_command_result))
+        .route("/command-keys", get(get_command_keys))
         .route("/api/remediations", get(list_remediations))
         .route("/api/remediations/{id}/approve", axum::routing::post(approve_remediation))
         .route("/api/remediations/{id}/reject", axum::routing::post(reject_remediation))
         .route("/auth/config", get(auth_config))
         .route("/api/me", get(me))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/system/health", get(system_health))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

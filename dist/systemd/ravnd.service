@@ -1,0 +1,73 @@
+# ravnd.service — Ravn detection agent (non-NixOS host install)
+#
+# Hardening directives mirror the NixOS module at nixos/modules/agent.nix
+# (services.ravn.agent.serviceConfig block) exactly so both install paths
+# offer the same security posture.
+#
+# Installation:
+#   sudo install -m 644 ravnd.service /etc/systemd/system/
+#   sudo install -m 644 /path/to/ravn-agent.toml /etc/ravn/ravn-agent.toml
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ravnd.service
+
+[Unit]
+Description=Ravn detection agent
+Documentation=https://github.com/olafkfreund/ravn-agents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ---- Binary and configuration ----
+ExecStart=/usr/local/bin/ravnd --config /etc/ravn/ravn-agent.toml
+Restart=on-failure
+RestartSec=5
+
+# ---- Identity & state ----
+# DynamicUser allocates a transient uid/gid and sets up the state dir securely.
+# On distros whose systemd predates DynamicUser (< 232) replace with:
+#   User=ravn
+#   Group=ravn
+# and create the user manually: useradd -r -s /sbin/nologin ravn
+DynamicUser=yes
+
+# Read the journal for the journald and auth/SSH taps.
+# Add "ravn" here once ravn-actuator is enabled (see ravn-actuator.service).
+SupplementaryGroups=systemd-journal
+
+# Local SQLite offline buffer (#21).
+StateDirectory=ravn-agent
+StateDirectoryMode=0700
+
+# ---- Remediation (optional — uncomment when ravn-actuator is running) ----
+# Environment=RAVN_REMEDIATION=1
+# Environment=RAVN_ACTUATOR_SOCKET=/run/ravn/actuator.sock
+# Environment=RAVN_COMMAND_POLL_SECS=10
+# SupplementaryGroups=systemd-journal ravn
+
+# ---- Hardening (mirrors nixos/modules/agent.nix) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# Equivalent to @system-service minus @privileged and @resources.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged ~@resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

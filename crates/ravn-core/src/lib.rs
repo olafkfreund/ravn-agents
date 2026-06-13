@@ -18,13 +18,15 @@ pub use event::{AgentId, Event, Severity, Source};
 pub use heartbeat::Heartbeat;
 pub use message::{Explanation, Message};
 pub use payload::{
-    kube_severity_for_reason, AuthPayload, ConfigDriftPayload, Extra, FailedUnitPayload,
-    JournaldPayload, KubeNodePayload, KubeWorkloadPayload, Payload, UpdatePayload,
+    kube_severity_for_reason, AuthPayload, CircuitBreakerTripPayload, ConfigDriftPayload, Extra,
+    FailedUnitPayload, JournaldPayload, KubeNodePayload, KubeWorkloadPayload, Payload,
+    UpdatePayload,
 };
 pub use remediation::{
-    ActionResult, ActionStatus, ApprovalRef, Capability, CommandEnvelope, Condition, Decision,
-    ParamType, ParameterSpec, RemediationProposal, RemediationRecord, RenderError, RiskTier,
-    Rollback, Template, TemplateError, TemplateMatch, Verify,
+    is_valid_k8s_label, is_valid_k8s_subdomain, ActionResult, ActionStatus, ApprovalRef,
+    Capability, CommandEnvelope, Condition, Decision, ParamType, ParameterSpec,
+    RemediationProposal, RemediationRecord, RenderError, RiskTier, Rollback, Template,
+    TemplateError, TemplateMatch, Verify,
 };
 
 /// Crate version, surfaced so the agent and server can report a build identity.

@@ -7,14 +7,11 @@
 //!    (`RAVN_VERIFYING_KEY_FILE`).
 //! 2. Subscribes to `ravn.commands.<agent-id>` on NATS.
 //! 3. For each received [`ravn_core::CommandEnvelope`]:
-//!    a. Re-verifies the Ed25519 signature (defence-in-depth; broker is not
-//!       trusted).
+//!    a. Re-verifies the Ed25519 signature (defence-in-depth; broker untrusted).
 //!    b. Validates K8s resource names.
 //!    c. Evaluates preconditions against the live cluster.
-//!    d. Executes the typed K8s capability steps (`DeletePod`,
-//!       `RestartDeployment`).
-//!    e. Verifies the post-condition (`PodState`) and performs rollback if
-//!       needed.
+//!    d. Executes the typed K8s capability steps (`DeletePod`, `RestartDeployment`).
+//!    e. Verifies the post-condition (`PodState`) and rolls back if needed.
 //! 4. Publishes an [`ravn_core::ActionResult`] to `ravn.results.<agent-id>`.
 //!
 //! ## Environment variables

@@ -93,8 +93,13 @@ fn maybe_explain(state: &AppState, message: &Message) {
     let metrics = state.metrics.clone();
 
     tokio::spawn(async move {
+        let start = std::time::Instant::now();
         match inference.explain(&event).await {
             Ok(explanation) => {
+                // #149: record inference latency for successful calls.
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics.inference_latency_seconds.observe(elapsed);
+
                 if let Err(error) =
                     db::update_explanation(&pool, event.id, event.occurred_at, &explanation).await
                 {
@@ -108,6 +113,12 @@ fn maybe_explain(state: &AppState, message: &Message) {
             }
             Err(error) => {
                 metrics.explanation_errors.inc();
+                // #149: classify timeouts separately so Grafana can distinguish
+                // "inference is slow" from "inference is broken".
+                let error_str = error.to_string();
+                if error_str.contains("timed out") || error_str.contains("deadline") || error_str.contains("timeout") {
+                    metrics.inference_timeouts.inc();
+                }
                 tracing::warn!(%error, event_id = %event.id, "K8s event explanation failed");
             }
         }

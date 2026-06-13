@@ -27,6 +27,10 @@
 //! Policy-file *signing* (so a tampered policy cannot silently widen
 //! auto-execution) is a follow-up; this PR covers evaluation, the auto path, the
 //! circuit breaker, and the kill switch.
+//!
+//! **#149:** `evaluate` now returns [`EvaluateResult`] which also carries the
+//! `breaker_tripped` flag so the call site can increment the metric and emit a
+//! self-observability Ravn event without the engine needing its own I/O.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -116,6 +120,18 @@ impl Policy {
     }
 }
 
+/// The result of [`PolicyEngine::evaluate`].
+///
+/// The decision is final. `breaker_tripped` is `true` when the circuit
+/// breaker was the reason an `auto` rule was downgraded to `approve`; the
+/// call site should increment the metric and emit a self-observability event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluateResult {
+    pub decision: PolicyDecision,
+    /// Set when the circuit breaker fired on this call.
+    pub breaker_tripped: bool,
+}
+
 /// The full policy engine: the declarative [`Policy`], the global kill switch,
 /// and the per-`(host, template)` circuit breaker. Shared via `Arc` in
 /// `AppState`; [`Self::evaluate`] is the single decision entry point.
@@ -123,7 +139,7 @@ pub struct PolicyEngine {
     policy: Policy,
     /// Fleet-wide kill switch (`RAVN_REMEDIATION_AUTO`). When `false`, every
     /// decision is forced to `approve`.
-    auto_enabled: bool,
+    pub auto_enabled: bool,
     breaker: CircuitBreaker,
 }
 
@@ -136,22 +152,23 @@ impl PolicyEngine {
     /// Decide what to do with a matched remediation, applying every guardrail:
     /// kill switch → `dangerous`-never-auto → policy rule → circuit breaker.
     ///
-    /// `record_auto` must be `true` for the call that actually proceeds to
-    /// auto-execute, so the circuit breaker counts it; pass `false` for a dry
-    /// evaluation. The returned decision is final.
+    /// The returned [`EvaluateResult`] is final. `breaker_tripped` is `true`
+    /// when the circuit breaker downgraded `auto` → `approve` on this call so
+    /// the caller can emit a self-observability metric and Ravn event (#149).
     pub fn evaluate(
         &self,
         host: &str,
         tier: RiskTier,
         template_id: &str,
         now: DateTime<Utc>,
-    ) -> PolicyDecision {
+    ) -> EvaluateResult {
         // Kill switch forces everything to manual approval.
         if !self.auto_enabled {
-            return match self.policy.decide(host, tier) {
+            let decision = match self.policy.decide(host, tier) {
                 PolicyDecision::Forbid => PolicyDecision::Forbid,
                 _ => PolicyDecision::Approve,
             };
+            return EvaluateResult { decision, breaker_tripped: false };
         }
 
         let mut decision = self.policy.decide(host, tier);
@@ -167,12 +184,12 @@ impl PolicyEngine {
         if decision == PolicyDecision::Auto {
             if self.breaker.tripped(host, template_id, now) {
                 tracing::warn!(host, template = template_id, "circuit breaker tripped; auto downgraded to approve");
-                return PolicyDecision::Approve;
+                return EvaluateResult { decision: PolicyDecision::Approve, breaker_tripped: true };
             }
             self.breaker.record(host, template_id, now);
         }
 
-        decision
+        EvaluateResult { decision, breaker_tripped: false }
     }
 }
 
@@ -249,6 +266,11 @@ mod tests {
         PolicyEngine::new(policy, auto_enabled, max_auto, Duration::from_secs(60))
     }
 
+    /// Shorthand: extract just the decision from the result.
+    fn decide(eng: &PolicyEngine, host: &str, tier: RiskTier, tmpl: &str, now: DateTime<Utc>) -> PolicyDecision {
+        eng.evaluate(host, tier, tmpl, now).decision
+    }
+
     #[test]
     fn example_policy_file_loads_and_behaves() {
         let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../policy/example.toml"));
@@ -256,13 +278,13 @@ mod tests {
         let eng = PolicyEngine::new(policy, true, 5, Duration::from_secs(60));
         let now = Utc::now();
         // web-* safe → auto; db-* dangerous → forbid; guarded → approve.
-        assert_eq!(eng.evaluate("web-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
-        assert_eq!(eng.evaluate("db-1", RiskTier::Dangerous, "t", now), PolicyDecision::Forbid);
-        assert_eq!(eng.evaluate("any-host", RiskTier::Guarded, "t", now), PolicyDecision::Approve);
+        assert_eq!(decide(&eng, "web-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "db-1", RiskTier::Dangerous, "t", now), PolicyDecision::Forbid);
+        assert_eq!(decide(&eng, "any-host", RiskTier::Guarded, "t", now), PolicyDecision::Approve);
         // A missing file is the default-deny policy: everything approves.
         let missing = Policy::load_file(std::path::Path::new("/no/such/policy.toml")).unwrap();
         let eng = PolicyEngine::new(missing, true, 5, Duration::from_secs(60));
-        assert_eq!(eng.evaluate("web-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
+        assert_eq!(decide(&eng, "web-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
     }
 
     #[test]
@@ -281,7 +303,7 @@ mod tests {
     fn default_deny_with_no_rules_is_approve() {
         let eng = engine("", true, 5);
         assert_eq!(
-            eng.evaluate("host-1", RiskTier::Safe, "t", Utc::now()),
+            decide(&eng, "host-1", RiskTier::Safe, "t", Utc::now()),
             PolicyDecision::Approve
         );
     }
@@ -296,7 +318,7 @@ mod tests {
             5,
         );
         assert_eq!(
-            eng.evaluate("host-1", RiskTier::Safe, "t", Utc::now()),
+            decide(&eng, "host-1", RiskTier::Safe, "t", Utc::now()),
             PolicyDecision::Auto
         );
     }
@@ -311,7 +333,7 @@ mod tests {
             5,
         );
         assert_eq!(
-            eng.evaluate("host-1", RiskTier::Guarded, "t", Utc::now()),
+            decide(&eng, "host-1", RiskTier::Guarded, "t", Utc::now()),
             PolicyDecision::Forbid
         );
     }
@@ -327,9 +349,9 @@ mod tests {
             5,
         );
         let now = Utc::now();
-        assert_eq!(eng.evaluate("web-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "web-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
         // Different host falls through to default-deny (approve).
-        assert_eq!(eng.evaluate("db-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
+        assert_eq!(decide(&eng, "db-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
     }
 
     #[test]
@@ -346,8 +368,8 @@ mod tests {
             5,
         );
         let now = Utc::now();
-        assert_eq!(eng.evaluate("web-1", RiskTier::Safe, "t", now), PolicyDecision::Forbid);
-        assert_eq!(eng.evaluate("web-2", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "web-1", RiskTier::Safe, "t", now), PolicyDecision::Forbid);
+        assert_eq!(decide(&eng, "web-2", RiskTier::Safe, "t", now), PolicyDecision::Auto);
     }
 
     #[test]
@@ -361,7 +383,7 @@ mod tests {
         );
         // Even an explicit `auto` rule is downgraded for the dangerous tier.
         assert_eq!(
-            eng.evaluate("host-1", RiskTier::Dangerous, "t", Utc::now()),
+            decide(&eng, "host-1", RiskTier::Dangerous, "t", Utc::now()),
             PolicyDecision::Approve
         );
     }
@@ -380,9 +402,9 @@ mod tests {
         );
         let now = Utc::now();
         // `auto` is forced to `approve` …
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
         // … but `forbid` still forbids (kill switch never widens execution).
-        assert_eq!(eng.evaluate("host-1", RiskTier::Guarded, "t", now), PolicyDecision::Forbid);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Guarded, "t", now), PolicyDecision::Forbid);
     }
 
     #[test]
@@ -396,13 +418,15 @@ mod tests {
         );
         let now = Utc::now();
         // First two auto-executions pass.
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "t", now), PolicyDecision::Auto);
         // The third trips the breaker and escalates to a human.
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", now), PolicyDecision::Approve);
+        let result = eng.evaluate("host-1", RiskTier::Safe, "t", now);
+        assert_eq!(result.decision, PolicyDecision::Approve);
+        assert!(result.breaker_tripped, "breaker_tripped must be set on the third call");
         // A different (host, template) pair has its own independent budget.
-        assert_eq!(eng.evaluate("host-2", RiskTier::Safe, "t", now), PolicyDecision::Auto);
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "other", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-2", RiskTier::Safe, "t", now), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "other", now), PolicyDecision::Auto);
     }
 
     #[test]
@@ -416,11 +440,13 @@ mod tests {
         // A tiny 10ms window so aged-out hits clear quickly.
         let eng = PolicyEngine::new(policy, true, 1, Duration::from_millis(10));
         let t0 = Utc::now();
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", t0), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "t", t0), PolicyDecision::Auto);
         // Immediately again → tripped.
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", t0), PolicyDecision::Approve);
+        let result = eng.evaluate("host-1", RiskTier::Safe, "t", t0);
+        assert_eq!(result.decision, PolicyDecision::Approve);
+        assert!(result.breaker_tripped);
         // After the window elapses, the old hit ages out and auto resumes.
         let later = t0 + chrono::Duration::milliseconds(50);
-        assert_eq!(eng.evaluate("host-1", RiskTier::Safe, "t", later), PolicyDecision::Auto);
+        assert_eq!(decide(&eng, "host-1", RiskTier::Safe, "t", later), PolicyDecision::Auto);
     }
 }

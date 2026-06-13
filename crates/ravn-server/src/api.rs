@@ -250,6 +250,60 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+/// Self-observability health snapshot (#149).
+///
+/// Returns the current kill-switch state, recent circuit-breaker trip count,
+/// inference health (whether the client is configured), and command-channel
+/// error count. Polled by the portal banner — lightweight (no DB).
+#[derive(Debug, Serialize)]
+pub struct SystemHealth {
+    /// Whether the global auto-remediation kill switch is active (true = auto disabled).
+    pub kill_switch_active: bool,
+    /// Inference client is configured (true) or disabled (false).
+    pub inference_configured: bool,
+    /// Total circuit-breaker trips since startup.
+    pub circuit_breaker_trips_total: u64,
+    /// Total remediation outcomes by status since startup.
+    pub remediation_outcomes: std::collections::BTreeMap<String, u64>,
+    /// Total inference timeouts since startup.
+    pub inference_timeouts_total: u64,
+    /// Total command-channel errors since startup.
+    pub command_channel_errors_total: u64,
+}
+
+async fn system_health(State(state): State<AppState>) -> Json<SystemHealth> {
+    // Collect counter values from the Prometheus metric families.
+    use prometheus::core::Collector;
+
+    let breaker_trips = state.metrics.circuit_breaker_trips.get() as u64;
+    let inference_timeouts = state.metrics.inference_timeouts.get() as u64;
+    let command_errors = state.metrics.command_channel_errors.get() as u64;
+    let kill_switch = state.metrics.kill_switch_active.get() == 1;
+
+    // Gather remediation_outcomes label values.
+    let mut outcomes = std::collections::BTreeMap::new();
+    for mf in state.metrics.remediation_outcomes.collect() {
+        for m in mf.get_metric() {
+            let status = m
+                .get_label()
+                .iter()
+                .find(|lp| lp.get_name() == "status")
+                .map(|lp| lp.get_value().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            outcomes.insert(status, m.get_counter().get_value() as u64);
+        }
+    }
+
+    Json(SystemHealth {
+        kill_switch_active: kill_switch,
+        inference_configured: state.inference.is_some(),
+        circuit_breaker_trips_total: breaker_trips,
+        remediation_outcomes: outcomes,
+        inference_timeouts_total: inference_timeouts,
+        command_channel_errors_total: command_errors,
+    })
+}
+
 /// Prometheus metrics in text exposition format (#40). Public.
 async fn metrics(State(state): State<AppState>) -> Response {
     if let Ok(agents) = db::list_agents(&state.pool).await {
@@ -337,6 +391,14 @@ async fn post_command_result(
     Json(result): Json<ravn_core::ActionResult>,
 ) -> StatusCode {
     tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
+    // #149: record the outcome metric before anything else so even a partial
+    // result is counted. The status is the wire string (e.g. "succeeded").
+    let status_str = serde_json::to_value(result.status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    state.metrics.record_remediation_outcome(&status_str);
+
     // Close the matching remediation record (#115), and keep the raw result.
     if let Some((record, signature)) = state.remediations.record_result(result.clone()) {
         // Reflect the outcome into the knowledge base (#118): create or update
@@ -495,7 +557,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Endpoints reachable without auth even when tokens are configured.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ready" | "/metrics" | "/enroll" | "/ingest" | "/auth/config")
+    matches!(
+        path,
+        "/ready" | "/metrics" | "/enroll" | "/ingest" | "/auth/config" | "/api/system/health"
+    )
 }
 
 /// The caller's resolved role (#26), for role-aware portal UI. Behind auth, so
@@ -630,6 +695,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/config", get(auth_config))
         .route("/api/me", get(me))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/system/health", get(system_health))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 

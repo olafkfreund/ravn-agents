@@ -132,6 +132,27 @@ pub fn message_to_stored(msg: &Message) -> StoredEvent {
     }
 }
 
+/// Build the API/wire `StoredEvent` shape from a synthetic control-plane
+/// [`Event`] (#149). Used for self-observability events (e.g. circuit-breaker
+/// trips) that are fanned out to WebSocket subscribers but not persisted in
+/// the database.
+pub fn synthetic_event_to_stored(ev: &ravn_core::Event) -> StoredEvent {
+    StoredEvent {
+        id: ev.id,
+        occurred_at: ev.occurred_at,
+        observed_at: ev.observed_at,
+        received_at: Utc::now(),
+        agent_id: ev.agent_id.0,
+        host: ev.host.clone(),
+        severity: enum_str(&ev.severity),
+        source: enum_str(&ev.source()),
+        title: ev.title.clone(),
+        category_hints: ev.category_hints.clone(),
+        payload: serde_json::to_value(&ev.payload).unwrap_or(serde_json::Value::Null),
+        explanation: None,
+    }
+}
+
 /// Fetch the most recent events, newest first.
 pub async fn recent_events(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<StoredEvent>> {
     let rows = sqlx::query_as::<_, StoredEvent>(

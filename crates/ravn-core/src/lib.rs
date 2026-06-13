@@ -18,8 +18,9 @@ pub use event::{AgentId, Event, Severity, Source};
 pub use heartbeat::Heartbeat;
 pub use message::{Explanation, Message};
 pub use payload::{
-    kube_severity_for_reason, AuthPayload, ConfigDriftPayload, Extra, FailedUnitPayload,
-    JournaldPayload, KubeNodePayload, KubeWorkloadPayload, Payload, UpdatePayload,
+    kube_severity_for_reason, AuthPayload, CircuitBreakerTripPayload, ConfigDriftPayload, Extra,
+    FailedUnitPayload, JournaldPayload, KubeNodePayload, KubeWorkloadPayload, Payload,
+    UpdatePayload,
 };
 pub use remediation::{
     ActionResult, ActionStatus, ApprovalRef, Capability, CommandEnvelope, Condition, Decision,

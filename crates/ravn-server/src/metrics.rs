@@ -1,10 +1,29 @@
-//! Prometheus metrics for the control plane (#40).
+//! Prometheus metrics for the control plane (#40, #149).
 //!
 //! Exposes ingestion rate, heartbeats, errors, and agent liveness at
-//! `/metrics` so Ravn can scrape its own control plane. (OpenTelemetry traces
-//! and agent-side metrics are a follow-on.)
+//! `/metrics` so Ravn can scrape its own control plane. Extended in #149
+//! to cover self-observability: remediation outcomes, circuit-breaker trips,
+//! inference latency/failures, and kill-switch state.
+//!
+//! Metric inventory:
+//! - `ravn_events_ingested_total{severity}` — events through the ingest path
+//! - `ravn_heartbeats_total` — heartbeat pulses received
+//! - `ravn_ingest_errors_total` — persist / decode failures on ingest
+//! - `ravn_explanations_generated_total` — K8s-event explanations produced
+//! - `ravn_explanation_errors_total` — explanation attempts that failed
+//! - `ravn_agents{status}` — gauge: online / stale / offline agent counts
+//! - `ravn_remediation_outcomes_total{status}` — per-ActionStatus counter
+//! - `ravn_remediation_proposed_total{decision}` — auto / approve / forbid
+//! - `ravn_circuit_breaker_trips_total` — times the breaker downgraded auto → approve
+//! - `ravn_kill_switch_active` — 1 when auto-remediation is globally disabled
+//! - `ravn_inference_latency_seconds` — histogram of successful inference calls
+//! - `ravn_inference_timeouts_total` — inference calls that exceeded the deadline
+//! - `ravn_command_channel_errors_total` — failures enqueuing / delivering commands
 
-use prometheus::{Encoder, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
+};
 
 pub struct Metrics {
     registry: Registry,
@@ -20,11 +39,32 @@ pub struct Metrics {
     pub explanation_errors: IntCounter,
     /// Registered agents by liveness status (set at scrape time).
     agents: IntGaugeVec,
+
+    // ── #149 new metrics ──────────────────────────────────────────────────────
+
+    /// Remediation actions closed with a final ActionStatus from the agent.
+    pub remediation_outcomes: IntCounterVec,
+    /// Remediation proposals created, labeled by the policy decision taken
+    /// (`auto`, `approve`, `forbid`).
+    pub remediation_proposed: IntCounterVec,
+    /// Circuit-breaker trips: each time an `auto` decision was downgraded to
+    /// `approve` because the (host, template) hit rate limit.
+    pub circuit_breaker_trips: IntCounter,
+    /// 1 when the global auto-remediation kill switch is active, 0 otherwise.
+    pub kill_switch_active: IntGauge,
+    /// Latency histogram for successful inference calls (seconds).
+    pub inference_latency_seconds: Histogram,
+    /// Inference calls that exceeded the configured deadline.
+    pub inference_timeouts: IntCounter,
+    /// Failures on the command channel (build / enqueue / delivery errors).
+    pub command_channel_errors: IntCounter,
 }
 
 impl Metrics {
     pub fn new() -> Self {
         let registry = Registry::new();
+
+        // ── existing ──────────────────────────────────────────────────────────
         let events_ingested = IntCounterVec::new(
             Opts::new("ravn_events_ingested_total", "Events ingested by the control plane"),
             &["severity"],
@@ -50,12 +90,70 @@ impl Metrics {
         )
         .expect("valid metric");
 
-        registry.register(Box::new(events_ingested.clone())).unwrap();
-        registry.register(Box::new(heartbeats.clone())).unwrap();
-        registry.register(Box::new(ingest_errors.clone())).unwrap();
-        registry.register(Box::new(explanations_generated.clone())).unwrap();
-        registry.register(Box::new(explanation_errors.clone())).unwrap();
-        registry.register(Box::new(agents.clone())).unwrap();
+        // ── #149 ──────────────────────────────────────────────────────────────
+        let remediation_outcomes = IntCounterVec::new(
+            Opts::new(
+                "ravn_remediation_outcomes_total",
+                "Remediation actions closed, labeled by the agent-reported ActionStatus",
+            ),
+            &["status"],
+        )
+        .expect("valid metric");
+        let remediation_proposed = IntCounterVec::new(
+            Opts::new(
+                "ravn_remediation_proposed_total",
+                "Remediation proposals created, by policy decision (auto|approve|forbid)",
+            ),
+            &["decision"],
+        )
+        .expect("valid metric");
+        let circuit_breaker_trips = IntCounter::new(
+            "ravn_circuit_breaker_trips_total",
+            "Times the policy circuit breaker downgraded auto → approve",
+        )
+        .expect("valid metric");
+        let kill_switch_active = IntGauge::new(
+            "ravn_kill_switch_active",
+            "1 when the global auto-remediation kill switch is on (RAVN_REMEDIATION_AUTO=0)",
+        )
+        .expect("valid metric");
+        let inference_latency_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "ravn_inference_latency_seconds",
+                "Latency of successful inference calls in seconds",
+            )
+            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0]),
+        )
+        .expect("valid metric");
+        let inference_timeouts = IntCounter::new(
+            "ravn_inference_timeouts_total",
+            "Inference calls that exceeded the configured deadline",
+        )
+        .expect("valid metric");
+        let command_channel_errors = IntCounter::new(
+            "ravn_command_channel_errors_total",
+            "Failures on the remediation command channel (build / enqueue / delivery)",
+        )
+        .expect("valid metric");
+
+        // ── register ──────────────────────────────────────────────────────────
+        for m in [
+            Box::new(events_ingested.clone()) as Box<dyn prometheus::core::Collector>,
+            Box::new(heartbeats.clone()),
+            Box::new(ingest_errors.clone()),
+            Box::new(explanations_generated.clone()),
+            Box::new(explanation_errors.clone()),
+            Box::new(agents.clone()),
+            Box::new(remediation_outcomes.clone()),
+            Box::new(remediation_proposed.clone()),
+            Box::new(circuit_breaker_trips.clone()),
+            Box::new(kill_switch_active.clone()),
+            Box::new(inference_latency_seconds.clone()),
+            Box::new(inference_timeouts.clone()),
+            Box::new(command_channel_errors.clone()),
+        ] {
+            registry.register(m).expect("metric registered once");
+        }
 
         Self {
             registry,
@@ -65,6 +163,13 @@ impl Metrics {
             explanations_generated,
             explanation_errors,
             agents,
+            remediation_outcomes,
+            remediation_proposed,
+            circuit_breaker_trips,
+            kill_switch_active,
+            inference_latency_seconds,
+            inference_timeouts,
+            command_channel_errors,
         }
     }
 
@@ -73,6 +178,16 @@ impl Metrics {
         self.agents.with_label_values(&["online"]).set(online);
         self.agents.with_label_values(&["stale"]).set(stale);
         self.agents.with_label_values(&["offline"]).set(offline);
+    }
+
+    /// Record a closed remediation outcome by its ActionStatus string.
+    pub fn record_remediation_outcome(&self, status: &str) {
+        self.remediation_outcomes.with_label_values(&[status]).inc();
+    }
+
+    /// Record a policy decision taken at Prepare time.
+    pub fn record_remediation_proposed(&self, decision: &str) {
+        self.remediation_proposed.with_label_values(&[decision]).inc();
     }
 
     /// Render the metrics in Prometheus text exposition format.
@@ -106,5 +221,27 @@ mod tests {
         assert!(out.contains("ravn_heartbeats_total"));
         assert!(out.contains("ravn_agents"));
         assert!(out.contains("status=\"online\""));
+    }
+
+    #[test]
+    fn issue_149_metrics_render() {
+        let m = Metrics::new();
+        m.remediation_outcomes.with_label_values(&["succeeded"]).inc();
+        m.remediation_proposed.with_label_values(&["auto"]).inc();
+        m.circuit_breaker_trips.inc();
+        m.kill_switch_active.set(1);
+        m.inference_latency_seconds.observe(1.2);
+        m.inference_timeouts.inc();
+        m.command_channel_errors.inc();
+        let out = m.encode();
+        assert!(out.contains("ravn_remediation_outcomes_total"));
+        assert!(out.contains("status=\"succeeded\""));
+        assert!(out.contains("ravn_remediation_proposed_total"));
+        assert!(out.contains("decision=\"auto\""));
+        assert!(out.contains("ravn_circuit_breaker_trips_total"));
+        assert!(out.contains("ravn_kill_switch_active"));
+        assert!(out.contains("ravn_inference_latency_seconds"));
+        assert!(out.contains("ravn_inference_timeouts_total"));
+        assert!(out.contains("ravn_command_channel_errors_total"));
     }
 }

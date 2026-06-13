@@ -67,6 +67,8 @@ pub fn fault_signature(event: &Event) -> String {
             (key, p.reason.clone())
         }
         Payload::KubeNode(p) => (p.node.clone(), p.condition.clone()),
+        // Self-observability events (#149): keyed by host + template.
+        Payload::CircuitBreakerTrip(p) => (p.host.clone(), p.template_id.clone()),
     };
     format!("{source}:{key}:{state}")
 }

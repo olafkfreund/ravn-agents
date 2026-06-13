@@ -203,6 +203,10 @@ fn payload_kind_str(p: &Payload) -> &'static str {
         Payload::Update(_) => "update",
         Payload::KubeWorkload(_) => "kube_workload",
         Payload::KubeNode(_) => "kube_node",
+        // Self-observability event (#149) — never produced by an agent, so it
+        // never reaches template matching, but the kind string is defined for
+        // completeness.
+        Payload::CircuitBreakerTrip(_) => "circuit_breaker_trip",
     }
 }
 
@@ -696,6 +700,15 @@ impl RemediationStore {
 ///
 /// Spawns an async task; returns immediately so the NATS ingest loop is not
 /// delayed by DB I/O.
+///
+/// Knowledge base (#118): on a *matched* fault the proposal's rationale is biased
+/// with a deterministic recall note ("last N× this fired, template X succeeded");
+/// on an *unmatched* fault a `gap` entry is written so operators can see which
+/// faults still need a template.
+///
+/// **#149:** metrics are emitted for every policy decision and every closed
+/// action result; a self-observability Ravn event is published when the circuit
+/// breaker trips so the portal shows the alert.
 pub fn prepare(state: &crate::state::AppState, message: &ravn_core::Message) {
     let event = message.event.clone();
     let state = state.clone();
@@ -725,23 +738,67 @@ async fn prepare_inner(state: &crate::state::AppState, event: &Event) {
         proposal.rationale = format!("{} {}", proposal.rationale, note);
     }
 
-    match state.policy.evaluate(&event.host, template.risk_tier, &template_id, Utc::now()) {
+    let result = state.policy.evaluate(&event.host, template.risk_tier, &template_id, Utc::now());
+
+    // #149: emit the circuit-breaker trip metric + a self-observability Ravn
+    // event so the portal shows the alert and Grafana can graph it.
+    if result.breaker_tripped {
+        state.metrics.circuit_breaker_trips.inc();
+        emit_breaker_trip_event(state, &event.host, &template_id);
+    }
+
+    match result.decision {
         PolicyDecision::Forbid => {
             tracing::info!(template = %template_id, host = %event.host, "remediation forbidden by policy");
+            state.metrics.record_remediation_proposed("forbid");
         }
         PolicyDecision::Approve => {
+            state.metrics.record_remediation_proposed("approve");
             if let Some(id) = state.remediations.insert(proposal, signature).await {
                 tracing::info!(proposal = %id, template = %template_id, host = %event.host, "remediation proposed (awaiting approval)");
             }
         }
         PolicyDecision::Auto => {
+            state.metrics.record_remediation_proposed("auto");
             auto_execute(state, template, proposal, &template_id, &event.host, signature).await
         }
     }
 }
 
+/// Emit a synthetic Ravn event that records a circuit-breaker trip as a
+/// first-class fleet event (#149). Self-observability: Ravn alerts on itself.
+/// Best-effort — never panics or blocks the ingestion path.
+fn emit_breaker_trip_event(state: &crate::state::AppState, host: &str, template_id: &str) {
+    use ravn_core::{AgentId, Event, Payload, Severity};
+    use uuid::Uuid;
+
+    // A zero agent-id marks this as a synthetic control-plane event.
+    let agent_id = AgentId(Uuid::nil());
+    let now = Utc::now();
+    let event = Event {
+        id: Uuid::now_v7(),
+        occurred_at: now,
+        observed_at: now,
+        agent_id,
+        host: host.to_string(),
+        severity: Severity::Warning,
+        title: format!("Circuit breaker tripped: auto→approve for template {template_id} on {host}"),
+        category_hints: vec!["ravn:self".to_string(), "circuit-breaker".to_string()],
+        payload: Payload::CircuitBreakerTrip(ravn_core::CircuitBreakerTripPayload {
+            host: host.to_string(),
+            template_id: template_id.to_string(),
+        }),
+    };
+    // Fan the event to WebSocket subscribers immediately (no DB persist needed
+    // for an in-memory self-observability ping).
+    let stored = crate::db::synthetic_event_to_stored(&event);
+    let _ = state.events_tx.send(stored);
+    tracing::warn!(host, template = template_id, "circuit breaker tripped — emitting self-observability event");
+}
+
 /// Sign, enqueue, and record a policy-auto-approved remediation. Best-effort: a
 /// build failure is logged and dropped (it must never disturb ingestion).
+/// #149: build failures increment `ravn_command_channel_errors_total`.
 async fn auto_execute(
     state: &crate::state::AppState,
     template: &Template,
@@ -760,6 +817,7 @@ async fn auto_execute(
         Ok(env) => env,
         Err(e) => {
             tracing::warn!(%e, template = %template_id, host, "could not build auto-remediation command");
+            state.metrics.command_channel_errors.inc();
             return;
         }
     };

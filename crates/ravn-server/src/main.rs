@@ -193,13 +193,21 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(config.policy.auto_window_secs),
     ));
 
+    let metrics = {
+        let m = metrics::Metrics::new();
+        // #149: initialise kill-switch gauge at startup so it is visible in
+        // Grafana from the first scrape (1 = kill switch on / auto disabled).
+        m.kill_switch_active.set(if config.policy.auto_enabled { 0 } else { 1 });
+        std::sync::Arc::new(m)
+    };
+
     let app_state = AppState {
         pool,
         nats,
         events_tx,
         admin_token: config.admin_token.clone(),
         viewer_token: config.viewer_token.clone(),
-        metrics: std::sync::Arc::new(metrics::Metrics::new()),
+        metrics,
         ca,
         enroll_token,
         ingest_auth,

@@ -26,6 +26,10 @@ pub enum Payload {
     Update(UpdatePayload),
     KubeWorkload(KubeWorkloadPayload),
     KubeNode(KubeNodePayload),
+    /// A self-observability event: the policy circuit breaker tripped (#149).
+    /// Emitted by the control plane itself when an `auto` rule is downgraded to
+    /// `approve` due to rate-limiting on a `(host, template)` pair.
+    CircuitBreakerTrip(CircuitBreakerTripPayload),
 }
 
 impl Payload {
@@ -39,6 +43,7 @@ impl Payload {
             Payload::Update(_) => Source::Update,
             Payload::KubeWorkload(_) => Source::KubeWorkload,
             Payload::KubeNode(_) => Source::KubeNode,
+            Payload::CircuitBreakerTrip(_) => Source::RavnInternal,
         }
     }
 }
@@ -162,6 +167,16 @@ pub struct KubeNodePayload {
     pub message: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// Self-observability payload: emitted when the policy circuit breaker trips
+/// (#149). Source is [`Source::RavnInternal`]; host is the affected fleet host.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CircuitBreakerTripPayload {
+    /// The fleet host that triggered the rate-limit.
+    pub host: String,
+    /// The remediation template that was being evaluated.
+    pub template_id: String,
 }
 
 /// Deterministic severity for a Kubernetes event/condition reason (#54).

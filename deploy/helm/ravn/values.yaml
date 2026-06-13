@@ -1,26 +1,96 @@
-# Default values for the Ravn agents chart.
+# Default values for the Ravn agents Helm chart.
+# Override with --set or a custom values file.
+#
+# Quick-start (external control plane, the default design D2):
+#   helm install ravn deploy/helm/ravn \
+#     --namespace ravn-system --create-namespace \
+#     --set controlPlane.ingestUrl=https://ravn-cp.example.com/ingest \
+#     --set cluster=prod-eu
+#
+# Quick-start (in-cluster control plane — both agents and server in same cluster):
+#   helm install ravn deploy/helm/ravn \
+#     --namespace ravn-system --create-namespace \
+#     --set controlPlane.mode=inCluster \
+#     --set controlPlane.ingestUrl=http://ravn-server.ravn-system.svc:8080/ingest \
+#     --set cluster=prod-eu
 
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+# Set create=true to have the chart manage the Namespace object (useful for
+# GitOps / ArgoCD workflows). The conventional `helm install --create-namespace`
+# flag creates the namespace imperatively without this.
+namespace:
+  create: false
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
 image:
-  repository: ravn-k8s
-  tag: latest
+  # Both ravn-controller and ravn-node-agent ship in this single image.
+  # Override to a registry mirror or a SHA-pinned digest for production.
+  repository: ghcr.io/olafkfreund/ravn-k8s
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
-# Control plane the agents publish to. By design the control plane runs outside
-# the constrained cluster (D2); set `ingestUrl` to its authenticated HTTP
-# ingest endpoint (#57). `tokenAudience` must match the server's
-# RAVN_INGEST_AUDIENCE.
+# Optional image pull secrets (e.g. for a private registry).
+imagePullSecrets: []
+# - name: my-registry-secret
+
+# ---------------------------------------------------------------------------
+# Control plane connectivity
+# ---------------------------------------------------------------------------
 controlPlane:
+  # mode: "external" (default) — control plane runs outside this cluster.
+  # mode: "inCluster"           — control plane runs inside this cluster.
+  # In either case, set ingestUrl to the full HTTP/HTTPS /ingest endpoint.
+  mode: external
+
+  # Authenticated HTTP ingest endpoint. The agents POST events here using their
+  # projected ServiceAccount token as a Bearer credential.
+  # Required — the chart renders a validation error if this is the example value
+  # and you attempt a real deploy (catch it early with: helm template … | grep placeholder).
   ingestUrl: "https://ravn-control-plane.example.com/ingest"
-  tokenAudience: ravn
-  tokenPath: /var/run/secrets/ravn/token
 
-# Cluster identity recorded on every event (event `host`).
-cluster: default
-logLevel: info
+  # Expected audience of the projected ServiceAccount token. Must match the
+  # RAVN_INGEST_AUDIENCE env var on the ravn-server side.
+  tokenAudience: "ravn"
 
-# The cluster-wide workload controller (#55).
+  # Mount path for the projected token inside the containers.
+  # The individual file is at <tokenMount>/token.
+  tokenMount: "/var/run/secrets/ravn"
+
+  # TokenReview fallback: when the cluster OIDC JWKS is not reachable from the
+  # (external) control plane, set these to enable SA token validation via the
+  # Kubernetes TokenReview API instead.
+  tokenReview:
+    enabled: false
+    # apiUrl: "https://kubernetes.default.svc"   # in-cluster API server
+    # tokenFile: ""                              # path to a credential with system:auth-delegator
+    # caFile: ""                                 # PEM CA bundle for the API server
+
+# ---------------------------------------------------------------------------
+# Cluster identity
+# ---------------------------------------------------------------------------
+# Recorded as the `host` field on every event emitted from this cluster.
+cluster: "default"
+
+# Log level passed to RAVN_LOG (tracing env-filter syntax: info, debug, warn …).
+logLevel: "info"
+
+# ---------------------------------------------------------------------------
+# Controller (Deployment — one replica, cluster-wide)
+# ---------------------------------------------------------------------------
 controller:
   enabled: true
+
+  # Restrict the Event watch to a single namespace.
+  # Leave empty ("") to watch all namespaces (the production default; RBAC is
+  # cluster-wide read-only either way).
+  watchNamespace: ""
+
+  replicaCount: 1
+
   resources:
     requests:
       cpu: 10m
@@ -29,12 +99,25 @@ controller:
       cpu: 200m
       memory: 128Mi
 
-# The per-node DaemonSet (#56).
+  # Node selector, tolerations, and affinity for the controller pod.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Extra pod annotations (e.g. Prometheus scrape targets, Vault agent inject).
+  podAnnotations: {}
+
+  # Extra environment variables injected into the controller container.
+  extraEnv: []
+  # - name: RAVN_K8S_NAMESPACE
+  #   value: "ravn-test"
+
+# ---------------------------------------------------------------------------
+# Node agent (DaemonSet — one pod per node)
+# ---------------------------------------------------------------------------
 nodeAgent:
   enabled: true
-  # Run on every node, including tainted/control-plane nodes.
-  tolerations:
-    - operator: Exists
+
   resources:
     requests:
       cpu: 10m
@@ -42,3 +125,84 @@ nodeAgent:
     limits:
       cpu: 100m
       memory: 96Mi
+
+  # Run on every node, including tainted control-plane nodes.
+  tolerations:
+    - operator: Exists
+
+  nodeSelector: {}
+  affinity: {}
+  podAnnotations: {}
+
+  extraEnv: []
+
+# ---------------------------------------------------------------------------
+# Executor (FUTURE — gated on issue #146)
+# ---------------------------------------------------------------------------
+# The executor is the K8s-native supervised healing component that will land
+# in #146. It watches remediation proposals from the control plane and drives
+# typed, whitelisted pod-healing actions (restart, evict, scale) under the same
+# Ed25519-signed CommandEnvelope protocol used by the host actuator.
+#
+# This block is intentionally DISABLED. The templates are present and validated
+# by `helm lint`, but no Kubernetes objects are created until executor.enabled
+# is set to true — which requires the ravn-executor binary from #146 to be
+# built into the image.
+#
+# Dependency note: executor.enabled=true assumes:
+#   1. The ravn-k8s image ships the `ravn-executor` binary (#146).
+#   2. The control plane exposes the remediation approval endpoint (#146 adds
+#      the signing call on the server side).
+#   3. RAVN_EXECUTOR_SIGNING_KEY_FILE is projected (a Secret) at the path
+#      configured below.
+executor:
+  enabled: false  # <-- flip to true once #146 lands
+
+  # Image override: if the executor ships in a separate image from the
+  # controller/node-agent, set this. Defaults to the shared image above.
+  image: {}
+  # repository: ghcr.io/olafkfreund/ravn-executor
+  # tag: "0.2.0"
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  # Path to the Ed25519 verifying-key file (projected from a Secret by #146).
+  # The executor re-verifies every CommandEnvelope signature independently before
+  # driving any pod action — defence-in-depth identical to the host actuator.
+  signingKeyFile: "/var/run/secrets/ravn-executor/signing.key"
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# ---------------------------------------------------------------------------
+# Service account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  # Create ServiceAccounts for each enabled component. Set to false only if you
+  # manage ServiceAccounts externally and supply the names below.
+  create: true
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Pod security (applied to all components)
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

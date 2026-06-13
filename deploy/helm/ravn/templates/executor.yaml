@@ -1,0 +1,118 @@
+{{/*
+ravn-executor — Deployment for supervised K8s pod healing (FUTURE — issue #146).
+
+This template is DISABLED by default (executor.enabled=false). It is present
+and validated by `helm lint` so the chart stays correct as the binary is built.
+
+To activate: set executor.enabled=true in your values override. This requires:
+  1. The ravn-k8s image (or a separate executor.image) to ship the
+     `ravn-executor` binary — tracked in #146.
+  2. A Kubernetes Secret named `ravn-executor-signing-key` in the release
+     namespace containing the Ed25519 verifying key at the key `signing.key`.
+     The executor re-verifies every CommandEnvelope signature independently
+     (defence-in-depth identical to the host actuator — see ravn-actuator).
+  3. The control plane's remediation approval endpoint to be available and
+     configured — the signing call on the server side is part of #146.
+
+Architecture note: the executor watches pending remediation proposals from the
+control plane (polled via RAVN_INGEST_URL or a separate RAVN_EXECUTOR_API_URL),
+verifies the Ed25519-signed CommandEnvelope, and drives typed pod-healing actions
+(restart via eviction, force-delete, annotation update). It never takes action
+without a valid signed envelope — the same guarantee the host actuator provides.
+*/}}
+{{- if .Values.executor.enabled }}
+---
+# ── NOTE (#146) ──────────────────────────────────────────────────────────────
+# This Deployment is a pre-built scaffold. The ravn-executor binary, its exact
+# environment variables, and the signing-key Secret name/key are all defined by
+# issue #146. Update the env block below when #146 is merged.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ravn-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+  annotations:
+    ravn.io/issue: "#146"
+    ravn.io/status: "gated — requires #146 binary and signing-key Secret"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ravn.componentSelectorLabels" (list . "executor") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ravn.labels" . | nindent 8 }}
+        app.kubernetes.io/component: executor
+      {{- with .Values.executor.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: ravn-executor
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: executor
+          # Use executor.image override if provided; else fall back to the
+          # shared ravn-k8s image.
+          {{- if .Values.executor.image.repository }}
+          image: {{ include "ravn.image" (list . .Values.executor.image) | quote }}
+          {{- else }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # TODO (#146): replace with the actual executor binary name.
+          command: ["ravn-executor"]
+          env:
+            {{- include "ravn.commonEnv" . | nindent 12 }}
+            # Path to the Ed25519 verifying key. The executor independently
+            # re-verifies every CommandEnvelope before taking action.
+            - name: RAVN_EXECUTOR_SIGNING_KEY_FILE
+              value: {{ .Values.executor.signingKeyFile | quote }}
+            {{- with .Values.executor.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.executor.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "ravn.tokenVolumeMount" . | nindent 12 }}
+            # Mount the signing key Secret projected by #146.
+            - name: executor-signing-key
+              mountPath: {{ dir .Values.executor.signingKeyFile | quote }}
+              readOnly: true
+      volumes:
+        {{- include "ravn.tokenVolume" . | nindent 8 }}
+        # Secret: create this before enabling the executor.
+        # kubectl create secret generic ravn-executor-signing-key \
+        #   --from-file=signing.key=/path/to/verifying.key \
+        #   -n ravn-system
+        - name: executor-signing-key
+          secret:
+            secretName: ravn-executor-signing-key
+            defaultMode: 0400
+      {{- with .Values.executor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.executor.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.executor.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

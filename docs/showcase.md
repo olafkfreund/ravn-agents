@@ -127,10 +127,14 @@ design.
 - **Kubernetes** — a workload **controller**, a node **DaemonSet** agent, OIDC /
   TokenReview ingest auth, control-plane **inference for K8s events**, deploy
   manifests + a Helm chart + OCI images, and a kind/k3d end-to-end test.
-- **Supervised self-healing** — a **PARR** loop (Prepare/Act/Reflect/Review):
-  curated remediation templates, **Ed25519-signed** commands, a **privileged
-  actuator** under privilege separation, an at-most-once ledger, a default-deny
-  policy + circuit breaker, verify/rollback, and a retrospective knowledge base.
+- **Supervised self-healing (Linux/NixOS hosts)** — a **PARR** loop
+  (Prepare/Act/Reflect/Review): deterministic template matching (the LLM never
+  decides), **Ed25519-signed** commands, a **privileged actuator** under privilege
+  separation, an at-most-once ledger, a default-deny policy + circuit breaker,
+  verify/rollback, and a retrospective knowledge base. *K8s remediation is
+  detection + proposal only — the in-cluster executor is deferred
+  ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)); the audit trail
+  is in-memory today ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)).*
 - **One-box demo** — a NixOS host, a k3d cluster, and **GPU-accelerated** local
   explanations (AMD ROCm / NVIDIA / CPU), with a live `kill → propose → approve →
   heal` loop — `scripts/demo-up.sh`.

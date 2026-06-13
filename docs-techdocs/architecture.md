@@ -98,7 +98,15 @@ Detection closes the loop, under human control by default. The cycle is
 
 The detection path is unchanged: the model still never decides whether something is
 wrong, and a remediation only ever runs because a deterministic fault matched a
-template *and* the gate allowed it.
+template *and* the gate allowed it. The proposal itself is deterministic too — the
+LLM is never in the propose/act path (it explains, it never decides).
+
+**Scope today:** execution is shipped for **Linux/NixOS hosts** only. K8s templates
+(`k8s-pod-restart.toml`, `k8s-pod-log-restart.toml`) exist and the cluster controller
+detects + the server proposes, but there is **no in-cluster executor yet**
+([#146](https://github.com/olafkfreund/ravn-agents/issues/146)). The audit trail is
+currently in-memory and not durable across restarts
+([#143](https://github.com/olafkfreund/ravn-agents/issues/143)).
 
 ## Portal (React + TypeScript)
 
@@ -113,15 +121,19 @@ Vite + Tailwind + shadcn/ui + TanStack Query, WebSocket for live updates.
   colour-coded by worst live severity, filterable.
 - **Remediations** — pending proposals to approve (which signs + dispatches the
   command) and a history of past actions and their results.
-- **Category management** and **settings** (enrollment tokens, users, alert routing).
+- **Category management** and **settings** (enrollment tokens, users, remediation
+  policy, inference + knowledge connectors). *Alert routing is planned, not yet wired
+  — see "Output / alerting" below.*
 
 Full-Rust alternative (Leptos/Dioxus) is viable but React Flow's maturity wins for
 the topology view.
 
 ## Output / alerting
 
-Control plane fans messages to the in-app feed plus external sinks (ntfy, webhook,
-email, Slack), with routing rules by severity/category.
+Today the control plane fans messages to the **in-app live feed** (and the metrics
+endpoint). External alert sinks (ntfy, webhook, email, Slack) with routing rules by
+severity/category are **planned for M7 and not yet wired** — there is no alert-routing
+backend endpoint or portal configuration for them yet.
 
 ## Cross-cutting
 

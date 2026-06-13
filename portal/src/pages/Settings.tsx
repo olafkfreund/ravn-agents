@@ -460,6 +460,20 @@ export function Settings() {
           </div>
         </div>
 
+        {/* Alert Routing — planned for M7, not yet wired */}
+        <div className="rounded-xl border border-dashed border-line bg-surface p-5 shadow-card space-y-2 opacity-70">
+          <div className="flex items-center gap-2">
+            <h3 className="font-display text-lg font-bold">Alert Routing</h3>
+            <span className="rounded bg-surface-2 border border-line px-1.5 py-0.5 font-mono text-[9px] font-bold text-fg-mute uppercase tracking-wider">Not yet wired</span>
+          </div>
+          <p className="text-xs text-fg-mute">
+            External alert sinks (ntfy, webhook, email, Slack) with routing rules by
+            severity/category are planned for M7. There is no backend endpoint behind
+            this yet — events surface in the live feed only. Tracked on the{" "}
+            <a href="https://github.com/olafkfreund/ravn-agents/blob/main/docs/roadmap.md" className="text-accent hover:underline">roadmap</a>.
+          </p>
+        </div>
+
         {/* Action Bar */}
         <div className="flex items-center justify-between gap-4">
           {savedMessage && <span className="font-mono text-xs text-accent font-semibold">{savedMessage}</span>}

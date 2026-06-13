@@ -1,0 +1,1 @@
+{"explanation": "There was some SSH activity on the server. A user logged in successfully. This is normal behaviour and usually nothing to worry about.", "suggested_check": "who"}

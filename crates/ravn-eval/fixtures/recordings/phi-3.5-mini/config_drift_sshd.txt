@@ -1,0 +1,1 @@
+{"explanation": "/etc/ssh/sshd_config on web-01 was changed. The diff re-enables direct root login by setting PermitRootLogin to yes, which lowers the security of the host. This change should be reviewed and likely reverted.", "suggested_check": "review the sshd configuration changes"}

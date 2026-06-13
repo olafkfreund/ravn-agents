@@ -1,0 +1,1 @@
+{"explanation": "bastion-01 recorded repeated failed SSH logins for the root account from 203.0.113.7. A burst of failures from one remote address is the classic shape of a brute-force attempt; none succeeded, but the source should be blocked and direct root SSH disabled.", "suggested_check": "grep 203.0.113.7 /var/log/auth.log"}

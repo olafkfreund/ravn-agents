@@ -1,0 +1,1 @@
+{"explanation": "A container keeps restarting. This is a common Kubernetes issue and can be caused by many things including memory or networking. Try redeploying.", "suggested_check": "kubectl get pods -A"}

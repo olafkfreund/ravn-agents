@@ -1,0 +1,1 @@
+{"explanation": "Host bastion-01 saw repeated failed SSH login attempts for the root user originating from 203.0.113.7. This pattern is typical of a brute-force attack. The attempts failed, but the source IP should be blocked and root SSH access reviewed.", "suggested_check": "grep 203.0.113.7 /var/log/auth.log"}

@@ -1,0 +1,1 @@
+{"explanation": "A pod in the cluster is having problems. This can happen due to an image pull error or the node being down. Kubernetes will try to fix it automatically.", "suggested_check": "kubectl get pods"}

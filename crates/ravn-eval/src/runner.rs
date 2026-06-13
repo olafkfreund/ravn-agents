@@ -1,197 +1,243 @@
-//! Fixture loading and the live llama-server benchmark loop (#38).
+//! The scoring loop: drive a [`ModelBackend`] over the corpus and aggregate
+//! per-model [`Row`]s (#157).
 //!
-//! Fixture loading is hermetic and unit-tested; the live benchmark requires a
-//! running `llama-server` and is exercised only when the harness is pointed at
-//! an endpoint.
+//! The loop is backend-agnostic — it doesn't care whether explanations come
+//! from a live `llama-server` or a recorded run — so the same code produces the
+//! reproducible CI table and the live CPU benchmark.
 
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
-use ravn_agent::inference::{build_user_prompt, parse_explanation, SYSTEM_PROMPT};
-use ravn_core::Event;
-use serde::Deserialize;
+use anyhow::Result;
+use ravn_agent::inference::parse_explanation;
 
+use crate::backend::{Completion, ModelBackend, RecordedBackend};
+use crate::fixtures::{Category, Fixture};
 use crate::report::Row;
 use crate::rubric::{self, Score};
 
-/// The shared prompt-fixture directory (reused from the agent crate, #39).
-pub fn default_fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ravn-agent/tests/fixtures/prompts")
-}
-
-/// Load `(name, Event)` pairs from every `*.event.json` in `dir`, sorted by name.
-pub fn load_events(dir: &Path) -> Result<Vec<(String, Event)>> {
-    let mut out = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("reading fixtures dir {}", dir.display()))?;
-    for entry in entries {
-        let entry = entry?;
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        let Some(name) = file_name.strip_suffix(".event.json") else {
-            continue;
-        };
-        let json = std::fs::read_to_string(entry.path())
-            .with_context(|| format!("reading {file_name}"))?;
-        let event: Event =
-            serde_json::from_str(&json).with_context(|| format!("parsing {file_name} as Event"))?;
-        out.push((name.to_string(), event));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
-// --- llama.cpp response shapes -------------------------------------------------
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-    #[serde(default)]
-    timings: Option<Timings>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChatMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatMessage {
-    content: String,
-}
-
-/// llama.cpp per-request timings (present on recent server builds).
-#[derive(Deserialize, Default)]
-struct Timings {
-    #[serde(default)]
-    prompt_per_second: Option<f64>,
-    #[serde(default)]
-    predicted_per_second: Option<f64>,
-}
-
-/// Per-fixture benchmark outcome.
+/// Per-fixture scored outcome.
 pub struct EventResult {
     pub name: String,
+    pub category: Category,
     pub latency_ms: f64,
-    pub prompt_tps: f64,
-    pub gen_tps: f64,
+    pub prompt_tps: Option<f64>,
+    pub gen_tps: Option<f64>,
     pub score: Score,
 }
 
-/// Benchmark a single event against a model, measuring latency, throughput and
-/// the rubric quality of the parsed explanation.
-pub async fn bench_event(
-    http: &reqwest::Client,
-    endpoint: &str,
-    model: &str,
-    name: &str,
-    event: &Event,
-) -> Result<EventResult> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": build_user_prompt(event) },
-        ],
-        "temperature": 0.2,
-        "max_tokens": 320,
-        "response_format": { "type": "json_object" },
-    });
-
-    let started = Instant::now();
-    let resp = http
-        .post(format!("{endpoint}/v1/chat/completions"))
-        .json(&body)
-        .send()
-        .await
-        .context("inference request failed")?
-        .error_for_status()
-        .context("inference returned an error status")?
-        .json::<ChatResponse>()
-        .await
-        .context("decoding inference response")?;
-    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    let content = resp
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .unwrap_or_default();
-    let (text, check) = parse_explanation(&content);
-    let score = rubric::score(event, &text, check.as_deref());
-
-    let timings = resp.timings.unwrap_or_default();
-    Ok(EventResult {
-        name: name.to_string(),
-        latency_ms,
-        prompt_tps: timings.prompt_per_second.unwrap_or(0.0),
-        gen_tps: timings.predicted_per_second.unwrap_or(0.0),
+/// Score a single completion against a fixture.
+pub fn score_completion(fixture: &Fixture, completion: &Completion) -> EventResult {
+    let (text, check) = parse_explanation(&completion.content);
+    let score = rubric::score(&fixture.event, &fixture.reference, &text, check.as_deref());
+    EventResult {
+        name: fixture.name.clone(),
+        category: fixture.reference.category,
+        latency_ms: completion.latency_ms,
+        prompt_tps: completion.prompt_tps,
+        gen_tps: completion.gen_tps,
         score,
-    })
+    }
 }
 
-/// Benchmark a model across all fixtures, returning an aggregated [`Row`].
-pub async fn bench_model(
-    http: &reqwest::Client,
-    endpoint: &str,
+/// Mean of the reported (`Some`) values, or `None` if none reported.
+fn mean_reported(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let reported: Vec<f64> = values.flatten().collect();
+    if reported.is_empty() {
+        None
+    } else {
+        Some(reported.iter().sum::<f64>() / reported.len() as f64)
+    }
+}
+
+/// Aggregate per-fixture results into a model [`Row`], including the
+/// per-category overall-quality rollup.
+fn aggregate(
     model: &str,
-    fixtures: &[(String, Event)],
-) -> Result<Row> {
-    let mut results = Vec::with_capacity(fixtures.len());
-    for (name, event) in fixtures {
-        let r = bench_event(http, endpoint, model, name, event).await?;
+    recorded: bool,
+    captured_on: String,
+    mem_mb: Option<f64>,
+    results: &[EventResult],
+) -> Row {
+    let n = results.len().max(1) as f64;
+    let mean = |f: &dyn Fn(&EventResult) -> f64| results.iter().map(f).sum::<f64>() / n;
+
+    let gen_tps = mean_reported(results.iter().map(|r| r.gen_tps));
+    let prompt_tps = mean_reported(results.iter().map(|r| r.prompt_tps));
+
+    // Per-category overall mean, in a stable category order.
+    let mut buckets: BTreeMap<&'static str, (Category, f64, usize)> = BTreeMap::new();
+    for r in results {
+        let entry = buckets.entry(r.category.label()).or_insert((r.category, 0.0, 0));
+        entry.1 += r.score.overall();
+        entry.2 += 1;
+    }
+    let per_category = buckets
+        .values()
+        .map(|(cat, sum, count)| (*cat, sum / *count as f64))
+        .collect();
+
+    Row {
+        model: model.to_string(),
+        recorded,
+        captured_on,
+        faithfulness: mean(&|r| r.score.faithfulness()),
+        actionability: mean(&|r| r.score.actionability()),
+        overall: mean(&|r| r.score.overall()),
+        latency_ms: mean(&|r| r.latency_ms),
+        prompt_tps,
+        gen_tps,
+        mem_mb,
+        fixtures: results.len(),
+        per_category,
+    }
+}
+
+/// Benchmark a live backend across the whole corpus.
+pub async fn bench_live(backend: &dyn ModelBackend, corpus: &[Fixture]) -> Result<Row> {
+    let mut results = Vec::with_capacity(corpus.len());
+    for fixture in corpus {
+        let completion = backend.complete(&fixture.event).await?;
+        let r = score_completion(fixture, &completion);
         println!(
-            "  {:<28} quality={:.2}  {:.0}ms  gen={:.1} tok/s",
+            "  {:<28} overall={:.2}  faithful={:.2}  action={:.2}  {:.0}ms",
             r.name,
             r.score.overall(),
-            r.latency_ms,
-            r.gen_tps
+            r.score.faithfulness(),
+            r.score.actionability(),
+            r.latency_ms
         );
         results.push(r);
     }
-
-    let n = results.len().max(1) as f64;
-    let mean = |f: &dyn Fn(&EventResult) -> f64| results.iter().map(f).sum::<f64>() / n;
-    Ok(Row {
-        model: if model.is_empty() { "<server default>".into() } else { model.into() },
-        prompt_tps: mean(&|r| r.prompt_tps),
-        gen_tps: mean(&|r| r.gen_tps),
-        latency_ms: mean(&|r| r.latency_ms),
-        mem_mb: sample_memory_mb(http, endpoint).await,
-        quality: mean(&|r| r.score.overall()),
-        fixtures: results.len(),
-    })
+    let mem_mb = backend.memory_mb().await;
+    Ok(aggregate(
+        backend.name(),
+        backend.is_recorded(),
+        backend.captured_on().to_string(),
+        mem_mb,
+        &results,
+    ))
 }
 
-/// Best-effort RSS of the llama-server, scraped from its Prometheus `/metrics`
-/// (`--metrics`). Returns `None` if metrics are unavailable.
-pub async fn sample_memory_mb(http: &reqwest::Client, endpoint: &str) -> Option<f64> {
-    let body = http.get(format!("{endpoint}/metrics")).send().await.ok()?.text().await.ok()?;
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("process_resident_memory_bytes ") {
-            if let Ok(bytes) = rest.trim().parse::<f64>() {
-                return Some(bytes / (1024.0 * 1024.0));
-            }
-        }
+/// Benchmark a recorded backend, replaying responses keyed by fixture name.
+pub async fn bench_recorded(backend: &RecordedBackend, corpus: &[Fixture]) -> Result<Row> {
+    let mut results = Vec::with_capacity(corpus.len());
+    for fixture in corpus {
+        let completion = backend.complete_named(&fixture.name)?;
+        let r = score_completion(fixture, &completion);
+        println!(
+            "  {:<28} overall={:.2}  faithful={:.2}  action={:.2}",
+            r.name,
+            r.score.overall(),
+            r.score.faithfulness(),
+            r.score.actionability()
+        );
+        results.push(r);
     }
-    None
+    let mem_mb = backend.memory_mb().await;
+    Ok(aggregate(backend.name(), true, backend.captured_on().to_string(), mem_mb, &results))
+}
+
+/// Replay every committed recorded run under `recordings_root` against `corpus`,
+/// returning one [`Row`] per model sorted by directory name. This is the
+/// reproducible default path — what CI and the golden test exercise.
+pub async fn run_all_recorded(
+    recordings_root: &std::path::Path,
+    corpus: &[Fixture],
+) -> Result<Vec<Row>> {
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(recordings_root)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("manifest.json").exists())
+        .collect();
+    dirs.sort();
+
+    let mut rows = Vec::new();
+    for dir in &dirs {
+        let backend = RecordedBackend::load(dir)?;
+        rows.push(bench_recorded(&backend, corpus).await?);
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::RecordedBackend;
+    use crate::fixtures::{default_corpus_dir, load_corpus};
 
-    #[test]
-    fn loads_all_prompt_fixtures() {
-        let events = load_events(&default_fixtures_dir()).expect("load fixtures");
-        // Mirrors the #39 corpus: one event per detection source.
-        assert!(events.len() >= 5, "expected >=5 fixtures, got {}", events.len());
-        assert!(events.iter().any(|(n, _)| n == "failed_unit_nginx"));
-        // Every fixture renders a non-trivial prompt and yields salient tokens.
-        for (name, event) in &events {
-            assert!(!build_user_prompt(event).is_empty(), "{name} empty prompt");
-            assert!(!rubric::salient_tokens(event).is_empty(), "{name} no tokens");
+    #[tokio::test]
+    async fn recorded_run_produces_scored_rows_for_three_models() {
+        let corpus = load_corpus(&default_corpus_dir()).expect("corpus");
+        let root = RecordedBackend::recordings_dir();
+
+        let mut rows = Vec::new();
+        for model in ["qwen3-1.7b", "qwen2.5-3b", "phi-3.5-mini"] {
+            let backend = RecordedBackend::load(&root.join(model)).expect("load recording");
+            let row = bench_recorded(&backend, &corpus).await.expect("bench");
+            assert_eq!(row.fixtures, corpus.len(), "scored every fixture");
+            assert!(row.recorded);
+            assert!((0.0..=1.0).contains(&row.overall));
+            assert!(!row.per_category.is_empty());
+            rows.push(row);
         }
+
+        assert_eq!(rows.len(), 3, "#157 needs >=3 scored models");
+        // A capable model should beat the weak baseline if present.
+        let qwen3 = rows.iter().find(|r| r.model.contains("qwen3")).unwrap();
+        assert!(qwen3.overall > 0.5, "qwen3 should score reasonably, got {}", qwen3.overall);
+    }
+
+    #[tokio::test]
+    async fn weak_baseline_ranks_below_capable_models() {
+        // The harness must *discriminate*: the rubric is only useful if a
+        // fluent-but-ungrounded model scores clearly worse. This is the core
+        // evidence for #157's claim, in test form.
+        let corpus = load_corpus(&default_corpus_dir()).expect("corpus");
+        let rows = run_all_recorded(&RecordedBackend::recordings_dir(), &corpus)
+            .await
+            .expect("recorded run");
+
+        let weak = rows.iter().find(|r| r.model.contains("tinyllama")).unwrap();
+        let best = rows.iter().map(|r| r.overall).fold(0.0_f64, f64::max);
+        assert!(
+            weak.overall + 0.25 < best,
+            "weak baseline ({:.2}) must rank well below the best model ({:.2})",
+            weak.overall,
+            best
+        );
+        // And the weak model must trip hallucination traps (low faithfulness).
+        assert!(weak.faithfulness < 0.7, "weak faithfulness was {:.2}", weak.faithfulness);
+    }
+
+    /// Golden regression for the published results table + site page.
+    ///
+    /// Because scoring is deterministic and the recordings are committed, the
+    /// rendered page is reproducible byte-for-byte. This test pins it so a
+    /// rubric, corpus, or recording change shows up as a reviewable diff to the
+    /// published page — and `nix flake check` fails if `RESULTS.md` is stale.
+    ///
+    /// Re-bless after an intended change with `RAVN_BLESS=1 cargo test -p ravn-eval`.
+    #[tokio::test]
+    async fn results_page_matches_golden() {
+        use crate::report::render_site_page;
+        use std::path::Path;
+
+        let corpus = load_corpus(&default_corpus_dir()).expect("corpus");
+        let rows = run_all_recorded(&RecordedBackend::recordings_dir(), &corpus)
+            .await
+            .expect("recorded run");
+        let rendered = render_site_page(&rows, &corpus);
+
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("RESULTS.md");
+        if std::env::var_os("RAVN_BLESS").is_some() {
+            std::fs::write(&golden, &rendered).expect("bless RESULTS.md");
+            return;
+        }
+        let expected = std::fs::read_to_string(&golden)
+            .expect("missing RESULTS.md; run with RAVN_BLESS=1 to generate it");
+        assert_eq!(
+            rendered, expected,
+            "RESULTS.md drifted from the harness output; re-bless with RAVN_BLESS=1"
+        );
     }
 }

@@ -1,0 +1,8 @@
+{
+  "category": "oom_kill",
+  "reference_explanation": "The api container in pod api-7c9d (namespace checkout) was OOMKilled after exceeding its 512Mi memory limit, and has now done so 4 times. Kubernetes restarts the container each time, but it keeps hitting the same limit — either the limit is set too low for real traffic or the container is leaking memory.",
+  "must_mention": ["api-7c9d", "checkout", "OOMKilled", "api"],
+  "forbidden": ["disk", "node down", "image pull", "crashloop", "liveness probe", "dns"],
+  "expected_check": "kubectl -n checkout describe pod api-7c9d",
+  "check_keywords": ["kubectl", "api-7c9d"]
+}

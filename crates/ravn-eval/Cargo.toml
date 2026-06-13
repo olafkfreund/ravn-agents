@@ -1,6 +1,6 @@
 [package]
 name = "ravn-eval"
-description = "Model eval / benchmark harness: scores candidate models on the fixture set (#38)."
+description = "Explanation-quality benchmarks for small local models: scores faithfulness, actionability, and latency/RAM over a fixture corpus (#157)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]

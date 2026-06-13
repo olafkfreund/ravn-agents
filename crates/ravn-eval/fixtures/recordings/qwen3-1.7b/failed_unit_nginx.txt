@@ -1,0 +1,1 @@
+{"explanation": "nginx.service on web-01 failed with an exit-code result: the recent log shows bind() to 0.0.0.0:80 failing with 'Address already in use', so another process already holds port 80 and nginx cannot start until that conflict is cleared.", "suggested_check": "ss -ltnp sport = :80"}

@@ -1,0 +1,8 @@
+{
+  "category": "config_drift",
+  "reference_explanation": "/etc/ssh/sshd_config on web-01 changed: the diff flips PermitRootLogin from no to yes, which re-enables direct root login over SSH. That weakens the host's security posture and was likely unintended; the change should be reviewed and reverted unless it was deliberate.",
+  "must_mention": ["sshd_config", "web-01", "PermitRootLogin"],
+  "forbidden": ["passwordauthentication yes", "port changed", "deleted", "firewall", "kernel", "memory"],
+  "expected_check": "sshd -T | grep -i permitrootlogin",
+  "check_keywords": ["sshd", "permitrootlogin"]
+}

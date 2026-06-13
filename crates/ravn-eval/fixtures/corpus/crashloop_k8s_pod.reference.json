@@ -1,0 +1,9 @@
+{
+  "category": "failed_unit",
+  "reason": "Included as a Kubernetes workload-failure case alongside the OOM and systemd cases; scored under the failed_unit category for the rollup.",
+  "reference_explanation": "The worker container in pod worker-5f8b (namespace payments) is in CrashLoopBackOff and has restarted 9 times: it starts, exits or crashes immediately, and Kubernetes backs off before retrying. This is an application-level failure — the container logs from the previous run will show why it is exiting.",
+  "must_mention": ["worker-5f8b", "payments", "CrashLoopBackOff", "worker"],
+  "forbidden": ["oomkilled", "out of memory", "node not ready", "evicted", "disk pressure", "image pull"],
+  "expected_check": "kubectl -n payments logs worker-5f8b --previous",
+  "check_keywords": ["kubectl", "worker-5f8b"]
+}

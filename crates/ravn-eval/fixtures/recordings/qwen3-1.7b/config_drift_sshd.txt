@@ -1,0 +1,1 @@
+{"explanation": "/etc/ssh/sshd_config on web-01 changed: the diff flips PermitRootLogin from no to yes, re-enabling direct root login over SSH. That weakens the host's security posture and is likely unintended; review and revert unless the change was deliberate.", "suggested_check": "sshd -T | grep -i permitrootlogin"}

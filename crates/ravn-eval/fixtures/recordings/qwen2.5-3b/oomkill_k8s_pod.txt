@@ -1,0 +1,1 @@
+{"explanation": "Pod api-7c9d in the checkout namespace had its api container OOMKilled for exceeding the 512Mi memory limit, repeating 4 times. Kubernetes restarts the container, but it keeps exceeding the same limit, so the limit is likely too low or the container has a leak.", "suggested_check": "kubectl -n checkout describe pod api-7c9d | grep -A5 -i oom"}

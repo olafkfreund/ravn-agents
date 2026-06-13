@@ -1,0 +1,8 @@
+{
+  "model": "qwen2.5-3b",
+  "captured_on": "llama-server b4400, Q4_K_M, 8 threads, AMD Ryzen 7 7840U (CPU only)",
+  "latency_ms": 2040.0,
+  "gen_tps": 13.1,
+  "prompt_tps": 150.0,
+  "mem_mb": 2630.0
+}

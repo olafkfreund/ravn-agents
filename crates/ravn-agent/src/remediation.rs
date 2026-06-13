@@ -334,6 +334,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn min_poll_interval_is_enforced() {
         // The constant is the public contract.
         assert!(MIN_POLL_SECS >= 5, "minimum must be at least 5 s");

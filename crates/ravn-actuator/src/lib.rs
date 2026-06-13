@@ -950,15 +950,12 @@ mod tests {
 
         // Spawn both concurrently. The slow task polls verify for ~2 s.
         // The fast task should finish in well under 500 ms.
-        let slow_handle = tokio::spawn({
-            let vk = vk.clone();
-            async move { handle_command(&SlowVerifyExecutor, &vk, &slow_env).await }
-        });
+        // `vk` is `Copy`, so each `async move` block captures its own copy.
+        let slow_handle =
+            tokio::spawn(async move { handle_command(&SlowVerifyExecutor, &vk, &slow_env).await });
 
-        let fast_handle = tokio::spawn({
-            let vk = vk.clone();
-            async move { handle_command(&FastExecutor, &vk, &fast_env).await }
-        });
+        let fast_handle =
+            tokio::spawn(async move { handle_command(&FastExecutor, &vk, &fast_env).await });
 
         // Wait for the fast task first with a tight deadline well under the
         // slow task's 2 s timeout.

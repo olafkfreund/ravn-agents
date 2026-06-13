@@ -161,7 +161,7 @@ fn spawn_heartbeat(config: &Config, transport: Arc<Transport>, health: Health) {
 /// Spawn the remediation command-pull loop (#114) when a pinned key and an HTTP
 /// control-plane endpoint are available; otherwise log why it stays off.
 fn spawn_remediation(config: &Config) {
-    let Some(key) = remediation::load_pinned_key(&config.cred_dir) else {
+    let Some(ring) = remediation::load_pinned_keyring(&config.cred_dir) else {
         tracing::warn!("remediation enabled but no pinned command key (enroll first); pull disabled");
         return;
     };
@@ -178,7 +178,8 @@ fn spawn_remediation(config: &Config) {
         base,
         config.agent_id,
         config.api_token.clone(),
-        key,
+        ring,
+        config.cred_dir.clone(),
         ledger,
         config.actuator_socket.clone(),
         config.command_poll_secs,

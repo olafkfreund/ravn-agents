@@ -16,7 +16,7 @@
 //! ## Signature re-verification
 //!
 //! Re-verification happens *inside* [`ravn_actuator::handle_command`] via the
-//! injected [`VerifyingKey`]. The executor never acts on an envelope whose
+//! injected [`Keyring`]. The executor never acts on an envelope whose
 //! signature is absent, expired, or invalid. This provides defence-in-depth:
 //! even a compromised NATS broker cannot inject commands.
 
@@ -28,7 +28,7 @@ use async_nats::Subject;
 use futures_util::StreamExt;
 use ravn_actuator::{handle_command, CapabilityExecutor};
 use ravn_core::CommandEnvelope;
-use ravn_crypto::VerifyingKey;
+use ravn_crypto::Keyring;
 use tokio::sync::Mutex;
 
 /// Run the command-pull loop until the NATS connection closes or an
@@ -37,13 +37,13 @@ use tokio::sync::Mutex;
 /// - `nats_url` — e.g. `nats://nats.ravn-system.svc.cluster.local:4222`
 /// - `agent_id` — the executor's stable identity (used for the subscribe
 ///   subject and the result subject)
-/// - `verifying_key` — the control plane's Ed25519 public key; loaded from a
-///   Kubernetes Secret or ConfigMap at startup
+/// - `ring` — the control plane's trusted command-signing keyring (#150); loaded
+///   from a Kubernetes Secret or ConfigMap at startup
 /// - `executor` — the [`KubeExecutor`] (or a test mock)
 pub async fn run_command_loop<E>(
     nats_url: &str,
     agent_id: &str,
-    verifying_key: VerifyingKey,
+    ring: Keyring,
     executor: Arc<E>,
 ) -> anyhow::Result<()>
 where
@@ -105,7 +105,7 @@ where
         // preconditions, runs steps, verifies post-state, and handles rollback.
         // The executor trait is async (#144), so we await it directly — the K8s
         // API calls run on the current runtime, no `block_on`/`spawn_blocking`.
-        let result = handle_command(executor.as_ref(), &verifying_key, &env).await;
+        let result = handle_command(executor.as_ref(), &ring, &env).await;
 
         tracing::info!(
             %command_id,

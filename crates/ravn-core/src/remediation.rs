@@ -492,6 +492,16 @@ pub struct CommandEnvelope {
     pub nonce: String,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Identifier of the signing key that produced `sig` (#150). Lets a verifier
+    /// holding a *set* of trusted keys (a keyring) pick the right one, which is
+    /// what makes zero-downtime key rotation possible: the control plane can
+    /// start signing with a new `kid` while agents still trust the old one.
+    /// `None` on envelopes minted before key rotation (#114/P1) — a verifier then
+    /// falls back to the keyring's default (legacy single-pinned) key, so old
+    /// envelopes keep verifying. Part of [`Self::signing_payload`], so it is
+    /// covered by the signature and cannot be swapped to point at another key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
     /// Base64 Ed25519 signature over [`Self::signing_payload`]. `None` until the
     /// control plane signs it (#114); the agent rejects an envelope whose `sig`
     /// is absent or invalid.
@@ -519,6 +529,12 @@ impl CommandEnvelope {
             nonce: &'a str,
             issued_at: &'a DateTime<Utc>,
             expires_at: &'a DateTime<Utc>,
+            // Bound by the signature so the `kid` an envelope advertises cannot be
+            // swapped to point a verifier at a different trusted key (#150). Skipped
+            // when `None` so envelopes minted before key rotation (no `kid`) produce
+            // byte-identical payloads to before and stay verifiable.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            kid: &'a Option<String>,
         }
         let signable = Signable {
             command_id: &self.command_id,
@@ -534,6 +550,7 @@ impl CommandEnvelope {
             nonce: &self.nonce,
             issued_at: &self.issued_at,
             expires_at: &self.expires_at,
+            kid: &self.kid,
         };
         serde_json::to_vec(&signable).expect("CommandEnvelope signable fields always serialize")
     }
@@ -776,6 +793,7 @@ mod tests {
             nonce: "abc123".into(),
             issued_at: now,
             expires_at: now,
+            kid: None,
             sig: None,
         };
         let unsigned = env.signing_payload();
@@ -813,6 +831,7 @@ mod tests {
             nonce: "n".into(),
             issued_at: now,
             expires_at: now,
+            kid: Some("AbCdEf0123456789".into()),
             sig: Some("sig".into()),
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -984,6 +1003,7 @@ mod tests {
             nonce: "kube-nonce-1".into(),
             issued_at: now,
             expires_at: now + chrono::Duration::minutes(5),
+            kid: None,
             sig: None,
         };
         let json = serde_json::to_string(&env).unwrap();

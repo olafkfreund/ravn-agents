@@ -16,16 +16,24 @@ use std::sync::Mutex;
 use anyhow::Context;
 use ravn_core::{ActionResult, CommandEnvelope};
 use ravn_crypto::{
-    generate_signing_key, signing_key_from_b64, signing_key_to_b64, verifying_key_to_b64,
-    SigningKey,
+    generate_signing_key, key_id, signing_key_from_b64, signing_key_to_b64, verifying_key_from_b64,
+    verifying_key_to_b64, Keyring, SigningKey,
 };
 use uuid::Uuid;
 
-/// Holds the control plane's Ed25519 signing key and the base64 public key it
-/// advertises to agents at enrollment.
+/// Holds the control plane's *active* Ed25519 signing key plus the set of
+/// previous keys still trusted during a rotation overlap window (#150).
+///
+/// The active key signs new commands and is the keyring's default; previous keys
+/// only verify (commands they signed while in flight) and are dropped once the
+/// overlap window passes. Agents fetch the whole keyring on check-in and pin it,
+/// so a key rotates with zero verification failures and no re-enrollment.
 pub struct CommandSigner {
     key: SigningKey,
     pubkey_b64: String,
+    /// The trusted keyring advertised to agents: the active key (default) plus
+    /// any previous keys still inside their overlap window. JSON, precomputed.
+    keyring_json: String,
 }
 
 impl CommandSigner {
@@ -33,7 +41,23 @@ impl CommandSigner {
     /// (mode `0600`) if the file is absent. With `path = None`, generate an
     /// ephemeral key that does not survive a restart (logged as a warning) —
     /// acceptable for dev, never for a real fleet.
+    #[allow(dead_code)] // kept as the no-rotation convenience; exercised by tests
     pub fn load_or_generate(path: Option<&str>) -> anyhow::Result<Self> {
+        Self::load_or_generate_with_previous(path, None)
+    }
+
+    /// As [`Self::load_or_generate`], plus `previous_keys_dir`: a directory of
+    /// retiring **public** keys (each file one base64 Ed25519 pubkey) that the
+    /// control plane should keep trusting during a rotation overlap window (#150).
+    ///
+    /// Rotation is then operational, no code change: generate a new signing key,
+    /// point `RAVN_COMMAND_KEY` at it, drop the *old* pubkey into this directory,
+    /// restart. Agents pick up the new active key and keep trusting the old one
+    /// until you remove its file after the window.
+    pub fn load_or_generate_with_previous(
+        path: Option<&str>,
+        previous_keys_dir: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let key = match path {
             Some(p) if std::path::Path::new(p).exists() => {
                 let b64 = std::fs::read_to_string(p)
@@ -57,20 +81,74 @@ impl CommandSigner {
             }
         };
         let pubkey_b64 = verifying_key_to_b64(&key.verifying_key());
-        Ok(Self { key, pubkey_b64 })
+
+        // The active key is the keyring default (verifies legacy no-kid
+        // envelopes and is advertised as the active signing key).
+        let active = key.verifying_key();
+        let mut ring = Keyring::single(active);
+        let active_kid = key_id(&active);
+
+        if let Some(dir) = previous_keys_dir {
+            for (file, b64) in read_previous_pubkeys(dir)? {
+                match verifying_key_from_b64(&b64) {
+                    Ok(prev) => {
+                        let kid = ring.insert(prev);
+                        if kid != active_kid {
+                            tracing::info!(%kid, "trusting previous command key during rotation overlap");
+                        }
+                    }
+                    Err(e) => {
+                        anyhow::bail!("invalid previous command key in {file}: {e}");
+                    }
+                }
+            }
+        }
+        ring.set_default(&active_kid);
+        let keyring_json = ring.to_json();
+
+        Ok(Self { key, pubkey_b64, keyring_json })
     }
 
     /// Sign an envelope in place. Called by the orchestrator (#115) when a
-    /// remediation is approved/auto-approved.
+    /// remediation is approved/auto-approved. Stamps the active key's `kid`.
     #[allow(dead_code)] // wired in by the orchestrator (#115)
     pub fn sign(&self, env: &mut CommandEnvelope) {
         ravn_crypto::sign_envelope(&self.key, env);
     }
 
-    /// The base64 public key advertised to agents at enrollment.
+    /// The base64 *active* public key advertised to agents at enrollment.
+    /// (Backward-compat: pre-#150 agents pin just this one key.)
     pub fn pubkey_b64(&self) -> &str {
         &self.pubkey_b64
     }
+
+    /// The full trusted keyring as a JSON document (#150): the active key plus
+    /// any previous keys inside their overlap window. Agents fetch this on
+    /// check-in and pin it, so a rotation needs no re-enrollment.
+    pub fn keyring_json(&self) -> &str {
+        &self.keyring_json
+    }
+}
+
+/// Read every regular file in `dir` as a base64 public key, returning
+/// `(filename, contents)` pairs. A missing directory is not an error (no
+/// previous keys configured); other IO errors propagate.
+fn read_previous_pubkeys(dir: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let path = std::path::Path::new(dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(path).with_context(|| format!("reading previous keys dir {dir}"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let contents = std::fs::read_to_string(entry.path())
+                .with_context(|| format!("reading previous key {name}"))?;
+            out.push((name, contents));
+        }
+    }
+    Ok(out)
 }
 
 /// Write a signing key as base64 with owner-only (`0600`) permissions.
@@ -153,6 +231,7 @@ mod tests {
             nonce: "n".into(),
             issued_at: now,
             expires_at: now + chrono::Duration::minutes(5),
+            kid: None,
             sig: None,
         }
     }
@@ -184,6 +263,46 @@ mod tests {
         second.sign(&mut env);
         let pubkey = verifying_key_from_b64(&pubkey_b64).unwrap();
         verify_envelope(&pubkey, &env, chrono::Utc::now()).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_advertises_active_plus_previous_keys() {
+        use ravn_crypto::{key_id, signing_key_to_b64, verifying_key_to_b64, Keyring};
+
+        let dir = std::env::temp_dir().join(format!("ravn-prevkeys-{}", Uuid::now_v7()));
+        // Keep the active signing key and the previous-keys directory separate:
+        // every file in the previous-keys dir is treated as a trusted pubkey.
+        let prev_dir = dir.join("previous");
+        std::fs::create_dir_all(&prev_dir).unwrap();
+
+        // An "old" key to retire, written into the previous-keys dir as a pubkey.
+        let old = generate_signing_key();
+        std::fs::write(prev_dir.join("old.b64"), verifying_key_to_b64(&old.verifying_key())).unwrap();
+
+        // A fresh active signing key persisted at its own path (outside prev_dir).
+        let active = generate_signing_key();
+        let keypath = dir.join("active.key");
+        std::fs::write(&keypath, signing_key_to_b64(&active)).unwrap();
+
+        let signer = CommandSigner::load_or_generate_with_previous(
+            Some(keypath.to_str().unwrap()),
+            Some(prev_dir.to_str().unwrap()),
+        )
+        .unwrap();
+
+        let ring = Keyring::from_json(signer.keyring_json()).unwrap();
+        assert_eq!(ring.len(), 2, "ring holds active + previous");
+        assert_eq!(ring.default_kid(), Some(key_id(&active.verifying_key()).as_str()));
+        assert!(ring.get(&key_id(&old.verifying_key())).is_some(), "old key still trusted");
+
+        // A command signed by the active key carries the active kid and verifies
+        // against the advertised ring.
+        let mut env = envelope(Uuid::now_v7());
+        signer.sign(&mut env);
+        assert_eq!(env.kid.as_deref(), Some(key_id(&active.verifying_key()).as_str()));
+        ravn_crypto::verify_envelope_with(&ring, &env, chrono::Utc::now()).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }

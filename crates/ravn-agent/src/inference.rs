@@ -202,6 +202,14 @@ pub fn build_user_prompt(event: &Event) -> String {
                 s.push_str(&format!("Message: {msg}\n"));
             }
         }
+        // Self-observability event (#149): synthetic, control-plane-originated,
+        // never inferred on by the agent — but the arm keeps the match total.
+        Payload::CircuitBreakerTrip(p) => {
+            s.push_str(&format!(
+                "Ravn circuit breaker tripped for template {} on {}\n",
+                p.template_id, p.host
+            ));
+        }
     }
     s
 }

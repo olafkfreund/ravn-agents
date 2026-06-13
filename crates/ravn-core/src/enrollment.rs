@@ -36,8 +36,16 @@ pub struct EnrollResponse {
     pub ca_certificate_pem: String,
     /// Base64 Ed25519 public key the control plane signs remediation commands
     /// with (#114). The agent pins this and rejects any command whose signature
-    /// does not verify against it.
+    /// does not verify against it. This is the *active* key; the full trusted set
+    /// (for rotation) is `command_keyring`.
     pub command_signing_pubkey: String,
+    /// The full trusted command-signing keyring as a JSON document (#150): the
+    /// active key plus any previous keys still inside a rotation overlap window.
+    /// The agent pins this and refreshes it on each check-in, so a key rotates
+    /// with no re-enrollment. Empty string on a control plane that predates key
+    /// rotation — the agent then falls back to pinning `command_signing_pubkey`.
+    #[serde(default)]
+    pub command_keyring: String,
     /// When the issued certificate expires.
     pub not_after: DateTime<Utc>,
 }

@@ -117,6 +117,12 @@ pub fn salient_tokens(event: &Event) -> Vec<String> {
             tokens.push(p.node.clone());
             tokens.push(p.condition.clone());
         }
+        // Self-observability event (#149): not part of the explanation eval
+        // corpus, but the arm keeps the match total.
+        Payload::CircuitBreakerTrip(p) => {
+            tokens.push(p.template_id.clone());
+            tokens.push(p.host.clone());
+        }
     }
     tokens.retain(|t| !t.trim().is_empty());
     tokens

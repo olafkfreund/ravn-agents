@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use kube::Client;
-use ravn_crypto::{verifying_key_from_b64, VerifyingKey};
+use ravn_crypto::{verifying_key_from_b64, Keyring, VerifyingKey};
 use ravn_k8s::{command_loop, executor::KubeExecutor};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     command_loop::run_command_loop(
         &nats_url,
         &agent_id.to_string(),
-        verifying_key,
+        Keyring::single(verifying_key),
         executor,
     )
     .await

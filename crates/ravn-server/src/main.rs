@@ -141,8 +141,11 @@ async fn main() -> anyhow::Result<()> {
     // Remediation command signing key (#114): its public key is advertised to
     // agents at enrollment; the orchestrator (#115) signs commands with it.
     let command_signer = std::sync::Arc::new(
-        command::CommandSigner::load_or_generate(config.command_key_path.as_deref())
-            .context("initializing the remediation command signing key")?,
+        command::CommandSigner::load_or_generate_with_previous(
+            config.command_key_path.as_deref(),
+            config.command_previous_keys_dir.as_deref(),
+        )
+        .context("initializing the remediation command signing key")?,
     );
     let command_queue = std::sync::Arc::new(command::CommandQueue::default());
 

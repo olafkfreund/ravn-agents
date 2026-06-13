@@ -460,6 +460,7 @@ pub fn build_command(
         nonce: Uuid::now_v7().to_string(),
         issued_at: now,
         expires_at: now + Duration::seconds(ttl_secs.max(1)),
+        kid: None, // stamped by `signer.sign` with the active key's id (#150)
         sig: None,
     };
     signer.sign(&mut env);

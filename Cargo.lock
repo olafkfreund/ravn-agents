@@ -2515,6 +2515,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ravn-mcp"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "ravn-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ravn-server"
 version = "0.0.0"
 dependencies = [

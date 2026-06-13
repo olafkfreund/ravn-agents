@@ -101,6 +101,17 @@
             meta.mainProgram = "ravn-eval";
           });
 
+          # The MCP server (#156): a read-only-by-default Model Context Protocol
+          # bridge to the control plane, shipped so MCP clients (Claude Code, etc.)
+          # can inspect the fleet. Replaces the scripts/ prototypes.
+          ravn-mcp = craneLib.buildPackage (commonArgs // {
+            inherit cargoArtifacts;
+            pname = "ravn-mcp";
+            cargoExtraArgs = "-p ravn-mcp";
+            doCheck = false;
+            meta.mainProgram = "ravn-mcp";
+          });
+
           # Reproducible OCI images (#37). Load with `docker load < $(nix build .#ravn-server-image --print-out-paths)`.
           ravn-server-image = pkgs.dockerTools.buildLayeredImage {
             name = "ravn-server";
@@ -128,11 +139,20 @@
             contents = [ ravn-k8s pkgs.cacert ];
             config.Entrypoint = [ "${ravn-k8s}/bin/ravn-controller" ];
           };
+
+          # The MCP server image (#156). Speaks MCP over stdio, so it has no
+          # exposed port; `cacert` lets rustls verify the control-plane TLS chain.
+          ravn-mcp-image = pkgs.dockerTools.buildLayeredImage {
+            name = "ravn-mcp";
+            tag = "latest";
+            contents = [ ravn-mcp pkgs.cacert ];
+            config.Entrypoint = [ "${ravn-mcp}/bin/ravn-mcp" ];
+          };
         in
         {
           packages = {
-            inherit ravn-agent ravn-server ravn-k8s ravn-actuator ravn-eval
-              ravn-agent-image ravn-server-image ravn-k8s-image;
+            inherit ravn-agent ravn-server ravn-k8s ravn-actuator ravn-eval ravn-mcp
+              ravn-agent-image ravn-server-image ravn-k8s-image ravn-mcp-image;
             default = ravn-server;
           } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             # End-to-end VM test of the self-healing loop (#121): inject a failed
@@ -144,7 +164,7 @@
           };
 
           checks = {
-            inherit ravn-agent ravn-server ravn-k8s ravn-actuator ravn-eval;
+            inherit ravn-agent ravn-server ravn-k8s ravn-actuator ravn-eval ravn-mcp;
 
             # Whole-workspace clippy and tests gate `nix flake check`.
             workspace-clippy = craneLib.cargoClippy (commonArgs // {

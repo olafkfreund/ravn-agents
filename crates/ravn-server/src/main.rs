@@ -151,7 +151,13 @@ async fn main() -> anyhow::Result<()> {
         remediation::TemplateRegistry::load_dir(std::path::Path::new(&config.templates_dir))
             .context("loading remediation templates")?,
     );
-    let remediations = std::sync::Arc::new(remediation::RemediationStore::default());
+    // Durable remediation store (#143): backed by Postgres; rebuilds the
+    // in-memory dedup cache from any rows that survived the previous run.
+    let remediations = std::sync::Arc::new(
+        remediation::RemediationStore::new(pool.clone())
+            .await
+            .context("initialising the remediation audit store")?,
+    );
 
     // Remediation knowledge base (#118): per-env markdown wiki for deterministic
     // recall + gap tracking. Disabled (no-op) when RAVN_KB_DIR is unset.

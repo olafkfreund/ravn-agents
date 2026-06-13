@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
-use ravn_core::{Heartbeat, Message};
+use ravn_core::{ActionResult, Decision, Heartbeat, Message, RemediationProposal, RemediationRecord};
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
@@ -514,6 +514,283 @@ pub async fn topology(pool: &PgPool, group_by: Option<&str>) -> anyhow::Result<T
     })
 }
 
+/// Render a fieldless serde enum (Severity, Source) as its wire string,
+/// e.g. `Severity::Warning -> "warning"`.
+fn enum_str<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+// ── Remediation audit trail (#143) ──────────────────────────────────────────
+
+/// A raw row from `remediation_records`, used internally by the DB layer.
+#[derive(FromRow)]
+struct RemediationRow {
+    /// Composite PK — stored for completeness; not accessed post-fetch.
+    #[allow(dead_code)]
+    proposal_id: Uuid,
+    #[allow(dead_code)]
+    proposal_created_at: DateTime<Utc>,
+    proposal: serde_json::Value,
+    /// Denormalised tag — the authoritative form is `decision_json`.
+    #[allow(dead_code)]
+    decision_state: String,
+    decision_json: serde_json::Value,
+    command_id: Option<Uuid>,
+    command_signature: Option<String>,
+    result_json: Option<serde_json::Value>,
+    fault_signature: String,
+    updated_at: DateTime<Utc>,
+}
+
+impl RemediationRow {
+    /// Reconstruct the full [`RemediationRecord`] from stored JSON columns.
+    fn into_record(self) -> anyhow::Result<RemediationRecord> {
+        let proposal: RemediationProposal = serde_json::from_value(self.proposal)
+            .context("deserializing proposal JSON")?;
+        let decision: Decision = serde_json::from_value(self.decision_json)
+            .context("deserializing decision JSON")?;
+        let result: Option<ActionResult> = self
+            .result_json
+            .map(serde_json::from_value)
+            .transpose()
+            .context("deserializing result JSON")?;
+        Ok(RemediationRecord {
+            proposal,
+            decision,
+            command_id: self.command_id,
+            signature: self.command_signature,
+            result,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// The string tag stored in `decision_state` for quick filtering.
+fn decision_state_tag(d: &Decision) -> &'static str {
+    match d {
+        Decision::Pending => "pending",
+        Decision::Approved { .. } => "approved",
+        Decision::Rejected { .. } => "rejected",
+    }
+}
+
+/// Insert a new remediation proposal row (initial `pending` state). Idempotent:
+/// a duplicate `proposal_id` is silently ignored (ON CONFLICT DO NOTHING).
+pub async fn insert_remediation(
+    pool: &PgPool,
+    proposal: &RemediationProposal,
+    fault_signature: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO remediation_records
+            (proposal_id, proposal_created_at, agent_id, host, template_id,
+             risk_tier, event_id, proposal, decision_state, decision_json, fault_signature)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', '"pending"', $9)
+        ON CONFLICT (proposal_id, proposal_created_at) DO NOTHING
+        "#,
+    )
+    .bind(proposal.id)
+    .bind(proposal.created_at)
+    .bind(proposal.agent_id.0)
+    .bind(&proposal.host)
+    .bind(&proposal.template_id)
+    .bind(enum_str(&proposal.risk_tier))
+    .bind(proposal.event_id)
+    .bind(sqlx::types::Json(proposal))
+    .bind(fault_signature)
+    .execute(pool)
+    .await
+    .context("inserting remediation record")?;
+    Ok(())
+}
+
+/// Insert a proposal that was auto-approved by policy — written already in the
+/// `approved` state with the command_id and signature. Idempotent.
+pub async fn insert_auto_approved_remediation(
+    pool: &PgPool,
+    proposal: &RemediationProposal,
+    decision: &Decision,
+    command_id: Uuid,
+    command_signature: Option<&str>,
+    fault_signature: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO remediation_records
+            (proposal_id, proposal_created_at, agent_id, host, template_id,
+             risk_tier, event_id, proposal, decision_state, decision_json,
+             command_id, command_signature, fault_signature)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (proposal_id, proposal_created_at) DO NOTHING
+        "#,
+    )
+    .bind(proposal.id)
+    .bind(proposal.created_at)
+    .bind(proposal.agent_id.0)
+    .bind(&proposal.host)
+    .bind(&proposal.template_id)
+    .bind(enum_str(&proposal.risk_tier))
+    .bind(proposal.event_id)
+    .bind(sqlx::types::Json(proposal))
+    .bind(decision_state_tag(decision))
+    .bind(sqlx::types::Json(decision))
+    .bind(command_id)
+    .bind(command_signature)
+    .bind(fault_signature)
+    .execute(pool)
+    .await
+    .context("inserting auto-approved remediation record")?;
+    Ok(())
+}
+
+/// Transition a record to `approved`: record the decision, command_id, and
+/// signature. Returns `false` if no `pending` record with that id exists.
+pub async fn approve_remediation(
+    pool: &PgPool,
+    proposal_id: Uuid,
+    decision: &Decision,
+    command_id: Uuid,
+    command_signature: Option<&str>,
+) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        r#"
+        UPDATE remediation_records
+        SET    decision_state    = $2,
+               decision_json     = $3,
+               command_id        = $4,
+               command_signature = $5,
+               updated_at        = now()
+        WHERE  proposal_id = $1
+          AND  decision_state = 'pending'
+        "#,
+    )
+    .bind(proposal_id)
+    .bind(decision_state_tag(decision))
+    .bind(sqlx::types::Json(decision))
+    .bind(command_id)
+    .bind(command_signature)
+    .execute(pool)
+    .await
+    .context("approving remediation")?
+    .rows_affected();
+    Ok(n > 0)
+}
+
+/// Transition a record to `rejected`. Returns `false` if no record matches.
+pub async fn reject_remediation(
+    pool: &PgPool,
+    proposal_id: Uuid,
+    decision: &Decision,
+) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        r#"
+        UPDATE remediation_records
+        SET    decision_state = $2,
+               decision_json  = $3,
+               updated_at     = now()
+        WHERE  proposal_id = $1
+        "#,
+    )
+    .bind(proposal_id)
+    .bind(decision_state_tag(decision))
+    .bind(sqlx::types::Json(decision))
+    .execute(pool)
+    .await
+    .context("rejecting remediation")?
+    .rows_affected();
+    Ok(n > 0)
+}
+
+/// Attach the agent-reported result to the record whose `command_id` matches.
+/// Returns the closed record and its stored fault signature so the caller can
+/// update the knowledge base. `None` if no matching record is found.
+pub async fn record_remediation_result(
+    pool: &PgPool,
+    result: &ActionResult,
+) -> anyhow::Result<Option<(RemediationRecord, String)>> {
+    // Single round-trip: UPDATE … RETURNING gives us the full row.
+    let maybe_row = sqlx::query_as::<_, RemediationRow>(
+        r#"
+        UPDATE remediation_records
+        SET    result_json = $2,
+               updated_at  = now()
+        WHERE  command_id = $1
+        RETURNING
+            proposal_id, proposal_created_at, proposal,
+            decision_state, decision_json,
+            command_id, command_signature, result_json,
+            fault_signature, updated_at
+        "#,
+    )
+    .bind(result.command_id)
+    .bind(sqlx::types::Json(result))
+    .fetch_optional(pool)
+    .await
+    .context("recording remediation result")?;
+
+    match maybe_row {
+        None => Ok(None),
+        Some(row) => {
+            let sig = row.fault_signature.clone();
+            let record = row.into_record()?;
+            Ok(Some((record, sig)))
+        }
+    }
+}
+
+/// Fetch all remediation records, newest first (by proposal_created_at).
+pub async fn list_remediation_records(pool: &PgPool) -> anyhow::Result<Vec<RemediationRecord>> {
+    let rows = sqlx::query_as::<_, RemediationRow>(
+        r#"
+        SELECT proposal_id, proposal_created_at, proposal,
+               decision_state, decision_json,
+               command_id, command_signature, result_json,
+               fault_signature, updated_at
+        FROM   remediation_records
+        ORDER  BY proposal_created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("listing remediation records")?;
+
+    rows.into_iter().map(|r| r.into_record()).collect()
+}
+
+/// Return the proposal for a pending record by id, or `None`.
+pub async fn pending_remediation_proposal(
+    pool: &PgPool,
+    proposal_id: Uuid,
+) -> anyhow::Result<Option<RemediationProposal>> {
+    let maybe: Option<(serde_json::Value,)> = sqlx::query_as(
+        r#"
+        SELECT proposal
+        FROM   remediation_records
+        WHERE  proposal_id    = $1
+          AND  decision_state = 'pending'
+        "#,
+    )
+    .bind(proposal_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetching pending remediation proposal")?;
+
+    match maybe {
+        None => Ok(None),
+        Some((json,)) => {
+            let proposal: RemediationProposal =
+                serde_json::from_value(json).context("deserializing pending proposal")?;
+            Ok(Some(proposal))
+        }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod agent_tests {
     use super::*;
@@ -534,24 +811,28 @@ mod agent_tests {
     }
 }
 
-/// Render a fieldless serde enum (Severity, Source) as its wire string,
-/// e.g. `Severity::Warning -> "warning"`.
-fn enum_str<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravn_core::{Severity, Source};
+    use ravn_core::{ApprovalRef, Severity, Source};
 
     #[test]
     fn enum_str_renders_wire_strings() {
         assert_eq!(enum_str(&Severity::Warning), "warning");
         assert_eq!(enum_str(&Severity::Critical), "critical");
         assert_eq!(enum_str(&Source::FailedUnit), "failed_unit");
+    }
+
+    #[test]
+    fn decision_state_tags_are_correct() {
+        assert_eq!(decision_state_tag(&Decision::Pending), "pending");
+        assert_eq!(
+            decision_state_tag(&Decision::Approved { by: ApprovalRef::PolicyAuto }),
+            "approved"
+        );
+        assert_eq!(
+            decision_state_tag(&Decision::Rejected { by: "x".into(), at: Utc::now(), reason: None }),
+            "rejected"
+        );
     }
 }

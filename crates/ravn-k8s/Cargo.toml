@@ -38,3 +38,5 @@ chrono = "0.4"
 # minor (v1.31, matching the k3d test cluster) so generated types line up.
 kube = { version = "0.96", default-features = false, features = ["client", "runtime", "rustls-tls"] }
 k8s-openapi = { version = "0.23", features = ["v1_31"] }
+# Bounded per-pod LRU for log-line deduplication (issue #147).
+lru = "0.12"

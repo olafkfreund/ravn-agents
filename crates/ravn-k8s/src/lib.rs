@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod http;
+pub mod logs;
 pub mod mapping;
 pub mod nats;
 pub mod node;

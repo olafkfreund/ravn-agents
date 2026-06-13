@@ -11,19 +11,53 @@
 //! handling — verification, validation, step sequencing, post-verify — is unit
 //! tested without root or a real socket; the socket/peer-credential wiring in
 //! [`serve`] is exercised by the NixOS VM end-to-end test (#121).
+//!
+//! # Concurrency model (fix #144)
+//!
+//! Each accepted connection is handled on its own `tokio::spawn`'d task, bounded
+//! by a shared [`tokio::sync::Semaphore`]. This means a long-running verify-poll
+//! on one connection cannot starve any other inbound command.
+//!
+//! The verify post-condition is polled asynchronously with
+//! `tokio::time::sleep` (500 ms interval) up to the envelope's `timeout_s` budget,
+//! so there is **no `std::thread::sleep` in the command path**.
+//!
+//! The real [`SystemctlExecutor`] uses `tokio::task::spawn_blocking` to offload the
+//! blocking `std::process::Command` calls to the dedicated blocking-thread pool,
+//! eliminating any `block_in_place` hazard on a shared runtime.
 
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use ravn_core::{ActionResult, ActionStatus, Capability, CommandEnvelope, Rollback};
 use ravn_crypto::{verify_envelope, VerifyingKey};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 
-/// Executes a single capability. Mutating capabilities return `Ok(None)`;
-/// read-only checks return the observed value.
+/// Maximum number of in-flight command connections handled concurrently.
+const MAX_CONCURRENT_COMMANDS: usize = 64;
+
+/// Polling interval used when waiting for a verify post-condition to become true.
+const VERIFY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Boxed, pinned future returned by [`CapabilityExecutor::run`]. Using a boxed
+/// future makes the trait dyn-compatible so callers can accept
+/// `&dyn CapabilityExecutor` without monomorphising the entire call chain.
+pub type ExecFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = Result<Option<String>, ExecError>> + Send + 'a>>;
+
+/// Executes a single capability asynchronously. Mutating capabilities return
+/// `Ok(None)`; read-only checks return the observed value.
+///
+/// Implementors that call blocking system APIs (e.g. `systemctl`) must
+/// offload the blocking work to [`tokio::task::spawn_blocking`] rather than
+/// calling it directly on the async runtime thread.
 pub trait CapabilityExecutor: Send + Sync {
-    fn run(&self, cap: &Capability) -> Result<Option<String>, ExecError>;
+    fn run<'a>(&'a self, cap: &'a Capability) -> ExecFuture<'a>;
 }
 
 /// A capability execution failure (non-zero exit, spawn error, invalid input).
@@ -46,7 +80,9 @@ impl std::error::Error for ExecError {}
 pub fn is_valid_unit(unit: &str) -> bool {
     !unit.is_empty()
         && unit.len() <= 256
-        && unit.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':' | '\\'))
+        && unit
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':' | '\\'))
 }
 
 /// The unit a capability targets, if any. `nix_rollback` targets no unit.
@@ -59,11 +95,16 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
     }
 }
 
-/// Handle one command end-to-end: verify the envelope, validate inputs, check the
-/// preconditions, run the steps in order, evaluate the verify post-condition, and
-/// — if verify fails — perform the declared rollback. Pure with respect to the
-/// injected [`CapabilityExecutor`], so it is fully unit-testable.
-pub fn handle_command(
+/// Handle one command end-to-end: verify the envelope, validate inputs, check
+/// the preconditions, run the steps in order, poll the verify post-condition
+/// asynchronously, and — if verify fails — perform the declared rollback. Pure
+/// with respect to the injected [`CapabilityExecutor`], so it is fully
+/// unit-testable.
+///
+/// The verify post-condition is polled every [`VERIFY_POLL_INTERVAL`] until
+/// either the expected state is observed or the envelope's `timeout_s` budget
+/// is exhausted — using `tokio::time::sleep` with no blocking thread involved.
+pub async fn handle_command(
     executor: &dyn CapabilityExecutor,
     key: &VerifyingKey,
     env: &CommandEnvelope,
@@ -75,10 +116,18 @@ pub fn handle_command(
         observed_state: None,
         finished_at: Utc::now(),
     };
-    let result = |status: ActionStatus, detail: Option<String>, observed: Option<String>| {
-        ActionResult { command_id: env.command_id, status, detail, observed_state: observed, finished_at: Utc::now() }
+    let make_result = |status: ActionStatus, detail: Option<String>, observed: Option<String>| {
+        ActionResult {
+            command_id: env.command_id,
+            status,
+            detail,
+            observed_state: observed,
+            finished_at: Utc::now(),
+        }
     };
-    let fail = |detail: String, observed: Option<String>| result(ActionStatus::Failed, Some(detail), observed);
+    let fail = |detail: String, observed: Option<String>| {
+        make_result(ActionStatus::Failed, Some(detail), observed)
+    };
 
     // 1. Independent signature + expiry verification.
     if let Err(e) = verify_envelope(key, env, Utc::now()) {
@@ -100,11 +149,11 @@ pub fn handle_command(
     // 3. Check preconditions BEFORE running any step; a failed precondition
     //    means the world is not in the expected state, so we do nothing (#117).
     for cond in &env.preconditions {
-        match executor.run(&cond.check) {
+        match executor.run(&cond.check).await {
             Ok(observed) => {
                 let observed = observed.unwrap_or_default();
                 if observed != cond.equals {
-                    return result(
+                    return make_result(
                         ActionStatus::PreconditionFailed,
                         Some(format!(
                             "precondition failed: expected {:?}, observed {:?}",
@@ -120,41 +169,51 @@ pub fn handle_command(
 
     // 4. Run the steps in order.
     for step in &env.steps {
-        if let Err(e) = executor.run(step) {
+        if let Err(e) = executor.run(step).await {
             return fail(format!("step failed: {e}"), None);
         }
     }
 
-    // 5. Verify post-condition, if declared. On failure, perform the declared
-    //    rollback before reporting (#117).
+    // 5. Verify post-condition, if declared. Poll asynchronously up to the
+    //    envelope's `timeout_s` budget with VERIFY_POLL_INTERVAL ticks.
+    //    On final failure, perform the declared rollback before reporting (#117).
     if let Some(verify) = &env.verify {
-        match executor.run(&verify.check) {
-            Ok(observed) => {
-                let observed = observed.unwrap_or_default();
-                if observed != verify.equals {
-                    let detail = format!(
-                        "verify failed: expected {:?}, observed {:?}",
-                        verify.equals, observed
-                    );
-                    return perform_rollback(executor, env, detail, observed);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(verify.timeout_s);
+
+        loop {
+            match executor.run(&verify.check).await {
+                Ok(observed) => {
+                    let observed = observed.unwrap_or_default();
+                    if observed == verify.equals {
+                        return make_result(ActionStatus::Succeeded, None, Some(observed));
+                    }
+                    // Not yet the desired state — check whether we have time left.
+                    if tokio::time::Instant::now() >= deadline {
+                        let detail = format!(
+                            "verify failed: expected {:?}, observed {:?}",
+                            verify.equals, observed
+                        );
+                        return perform_rollback(executor, env, detail, observed).await;
+                    }
+                    tokio::time::sleep(VERIFY_POLL_INTERVAL).await;
                 }
-                return result(ActionStatus::Succeeded, None, Some(observed));
-            }
-            Err(e) => {
-                let detail = format!("verify check errored: {e}");
-                return perform_rollback(executor, env, detail, String::new());
+                Err(e) => {
+                    let detail = format!("verify check errored: {e}");
+                    return perform_rollback(executor, env, detail, String::new()).await;
+                }
             }
         }
     }
 
-    result(ActionStatus::Succeeded, None, None)
+    make_result(ActionStatus::Succeeded, None, None)
 }
 
 /// Verification has failed; perform the envelope's declared rollback. If there is
 /// no rollback the outcome is plain [`ActionStatus::Failed`]; if a rollback runs
 /// but itself fails, the target is left in an unknown state and we return
 /// [`ActionStatus::Frozen`] so upstream stops auto-acting on it (#117).
-fn perform_rollback(
+async fn perform_rollback(
     executor: &dyn CapabilityExecutor,
     env: &CommandEnvelope,
     verify_detail: String,
@@ -171,58 +230,75 @@ fn perform_rollback(
 
     match env.rollback {
         Rollback::None => finished(ActionStatus::Failed, verify_detail),
-        Rollback::NixGeneration => match executor.run(&Capability::NixRollback) {
+        Rollback::NixGeneration => match executor.run(&Capability::NixRollback).await {
             Ok(_) => finished(
                 ActionStatus::Failed,
                 format!("{verify_detail}; rolled back to the previous NixOS generation"),
             ),
             Err(e) => finished(
                 ActionStatus::Frozen,
-                format!("{verify_detail}; rollback FAILED ({e}) — target frozen, escalate to a human"),
+                format!(
+                    "{verify_detail}; rollback FAILED ({e}) — target frozen, escalate to a human"
+                ),
             ),
         },
     }
 }
 
-/// The real executor: drives `systemctl`. Mutating verbs treat a non-zero exit as
-/// an error; `is-active` returns the printed state regardless of exit code (it
-/// exits non-zero for inactive/failed units while still naming the state).
+/// The real executor: drives `systemctl` via [`tokio::task::spawn_blocking`] so
+/// the blocking `std::process::Command` calls are offloaded to the dedicated
+/// blocking-thread pool and never stall the async runtime.
+///
+/// Mutating verbs treat a non-zero exit as an error; `is-active` returns the
+/// printed state regardless of exit code (it exits non-zero for inactive/failed
+/// units while still naming the state).
 pub struct SystemctlExecutor;
 
 impl CapabilityExecutor for SystemctlExecutor {
-    fn run(&self, cap: &Capability) -> Result<Option<String>, ExecError> {
-        use std::process::Command;
-        match cap {
-            Capability::ResetFailed { unit } => {
-                run_ok(Command::new("systemctl").arg("reset-failed").arg(unit))?;
-                Ok(None)
-            }
-            Capability::RestartUnit { unit } => {
-                run_ok(Command::new("systemctl").arg("restart").arg(unit))?;
-                Ok(None)
-            }
-            Capability::UnitState { unit } => {
-                let out = Command::new("systemctl")
-                    .arg("is-active")
-                    .arg(unit)
-                    .output()
-                    .map_err(|e| ExecError(format!("spawning systemctl: {e}")))?;
-                Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
-            }
-            // Roll the system back to its previous NixOS generation, then activate
-            // it — the universal safety net. Two direct-argv steps, no shell. Not
-            // hermetically unit-testable (needs a real NixOS host); the rollback
-            // *logic* in `handle_command` is covered via the MockExecutor.
-            Capability::NixRollback => {
-                const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
-                run_ok(Command::new("nix-env").arg("--rollback").arg("-p").arg(SYSTEM_PROFILE))?;
-                run_ok(Command::new(concat!(
-                    "/nix/var/nix/profiles/system",
-                    "/bin/switch-to-configuration"
-                ))
-                .arg("switch"))?;
-                Ok(None)
-            }
+    fn run<'a>(&'a self, cap: &'a Capability) -> ExecFuture<'a> {
+        // Clone the capability so it can be moved into the blocking closure.
+        let cap = cap.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || run_systemctl_sync(&cap))
+                .await
+                .map_err(|e| ExecError(format!("spawn_blocking panicked: {e}")))?
+        })
+    }
+}
+
+/// The synchronous systemctl implementation, called from within `spawn_blocking`.
+fn run_systemctl_sync(cap: &Capability) -> Result<Option<String>, ExecError> {
+    use std::process::Command;
+    match cap {
+        Capability::ResetFailed { unit } => {
+            run_ok(Command::new("systemctl").arg("reset-failed").arg(unit))?;
+            Ok(None)
+        }
+        Capability::RestartUnit { unit } => {
+            run_ok(Command::new("systemctl").arg("restart").arg(unit))?;
+            Ok(None)
+        }
+        Capability::UnitState { unit } => {
+            let out = Command::new("systemctl")
+                .arg("is-active")
+                .arg(unit)
+                .output()
+                .map_err(|e| ExecError(format!("spawning systemctl: {e}")))?;
+            Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+        }
+        // Roll the system back to its previous NixOS generation, then activate
+        // it — the universal safety net. Two direct-argv steps, no shell. Not
+        // hermetically unit-testable (needs a real NixOS host); the rollback
+        // *logic* in `handle_command` is covered via the MockExecutor.
+        Capability::NixRollback => {
+            const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
+            run_ok(Command::new("nix-env").arg("--rollback").arg("-p").arg(SYSTEM_PROFILE))?;
+            run_ok(Command::new(concat!(
+                "/nix/var/nix/profiles/system",
+                "/bin/switch-to-configuration"
+            ))
+            .arg("switch"))?;
+            Ok(None)
         }
     }
 }
@@ -249,7 +325,13 @@ fn peer_uid(stream: &UnixStream) -> anyhow::Result<u32> {
 
 /// Serve the actuator socket: accept connections, enforce the peer uid, and
 /// handle one newline-delimited JSON [`CommandEnvelope`] → [`ActionResult`] per
-/// connection. When `allowed_uid` is `Some`, only that uid may connect.
+/// connection.
+///
+/// Each accepted connection is spawned onto its own Tokio task (bounded by
+/// [`MAX_CONCURRENT_COMMANDS`]). A long-running verify-poll on one connection
+/// **cannot** starve any other inbound command.
+///
+/// When `allowed_uid` is `Some`, only that uid may connect.
 pub async fn serve(
     socket_path: &Path,
     key: VerifyingKey,
@@ -266,6 +348,10 @@ pub async fn serve(
     }
     tracing::info!(path = %socket_path.display(), "actuator listening");
 
+    let executor = Arc::new(executor);
+    let key = Arc::new(key);
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_COMMANDS));
+
     loop {
         let (stream, _addr) = listener.accept().await?;
         match peer_uid(&stream) {
@@ -279,9 +365,19 @@ pub async fn serve(
                 continue;
             }
         }
-        if let Err(e) = handle_connection(stream, &key, &executor).await {
-            tracing::warn!(%e, "actuator connection error");
-        }
+
+        let executor = Arc::clone(&executor);
+        let key = Arc::clone(&key);
+        // Acquire a permit before spawning — back-pressures callers if all
+        // MAX_CONCURRENT_COMMANDS slots are busy, without blocking the accept loop.
+        let permit = Arc::clone(&semaphore).acquire_owned().await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, &key, executor.as_ref()).await {
+                tracing::warn!(%e, "actuator connection error");
+            }
+            drop(permit); // release the semaphore slot when done
+        });
     }
 }
 
@@ -296,7 +392,7 @@ async fn handle_connection(
         return Ok(());
     }
     let env: CommandEnvelope = serde_json::from_str(line.trim())?;
-    let result = handle_command(executor, key, &env);
+    let result = handle_command(executor, key, &env).await;
     let mut out = serde_json::to_vec(&result)?;
     out.push(b'\n');
     reader.into_inner().write_all(&out).await?;
@@ -332,18 +428,26 @@ mod tests {
     }
 
     impl CapabilityExecutor for MockExecutor {
-        fn run(&self, cap: &Capability) -> Result<Option<String>, ExecError> {
+        fn run<'a>(&'a self, cap: &'a Capability) -> ExecFuture<'a> {
+            // Push to ran synchronously before returning the future so the
+            // ordering is deterministic regardless of await scheduling.
             self.ran.lock().unwrap().push(cap.clone());
-            match cap {
-                Capability::RestartUnit { .. } if self.fail_on_restart => {
-                    Err(ExecError("unit refused to start".into()))
+            let unit_state = self.unit_state.clone();
+            let fail_on_restart = self.fail_on_restart;
+            let fail_on_rollback = self.fail_on_rollback;
+            let cap = cap.clone();
+            Box::pin(async move {
+                match &cap {
+                    Capability::RestartUnit { .. } if fail_on_restart => {
+                        Err(ExecError("unit refused to start".into()))
+                    }
+                    Capability::NixRollback if fail_on_rollback => {
+                        Err(ExecError("switch-to-configuration failed".into()))
+                    }
+                    Capability::UnitState { .. } => Ok(Some(unit_state)),
+                    _ => Ok(None),
                 }
-                Capability::NixRollback if self.fail_on_rollback => {
-                    Err(ExecError("switch-to-configuration failed".into()))
-                }
-                Capability::UnitState { .. } => Ok(Some(self.unit_state.clone())),
-                _ => Ok(None),
-            }
+            })
         }
     }
 
@@ -353,11 +457,18 @@ mod tests {
         verify_equals: Option<&'a str>,
         precondition_equals: Option<&'a str>,
         rollback: Rollback,
+        /// Verify timeout in seconds (kept short in tests so polling exits fast).
+        verify_timeout_s: u64,
     }
 
     impl Default for EnvelopeOpts<'_> {
         fn default() -> Self {
-            Self { verify_equals: None, precondition_equals: None, rollback: Rollback::None }
+            Self {
+                verify_equals: None,
+                precondition_equals: None,
+                rollback: Rollback::None,
+                verify_timeout_s: 1,
+            }
         }
     }
 
@@ -389,7 +500,7 @@ mod tests {
             verify: opts.verify_equals.map(|eq| Verify {
                 check: Capability::UnitState { unit: "nginx.service".into() },
                 equals: eq.into(),
-                timeout_s: 30,
+                timeout_s: opts.verify_timeout_s,
             }),
             rollback: opts.rollback,
             approval_ref: ApprovalRef::PolicyAuto,
@@ -402,54 +513,54 @@ mod tests {
         env
     }
 
-    #[test]
-    fn happy_path_runs_steps_and_verifies() {
+    #[tokio::test]
+    async fn happy_path_runs_steps_and_verifies() {
         let key = generate_signing_key();
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Succeeded);
         assert_eq!(result.observed_state.as_deref(), Some("active"));
         let ran = exec.ran.lock().unwrap();
         assert_eq!(ran.len(), 3); // reset_failed, restart, unit_state
     }
 
-    #[test]
-    fn verify_mismatch_is_failed() {
+    #[tokio::test]
+    async fn verify_mismatch_is_failed() {
         let key = generate_signing_key();
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("failed"); // unit did not come back
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Failed);
         assert_eq!(result.observed_state.as_deref(), Some("failed"));
     }
 
-    #[test]
-    fn step_failure_is_failed_and_skips_verify() {
+    #[tokio::test]
+    async fn step_failure_is_failed_and_skips_verify() {
         let key = generate_signing_key();
         let env = signed_restart_envelope(&key, Some("active"));
         let mut exec = MockExecutor::new("active");
         exec.fail_on_restart = true;
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Failed);
         // unit_state check must NOT have run after the failed restart.
         let ran = exec.ran.lock().unwrap();
         assert!(!ran.iter().any(|c| matches!(c, Capability::UnitState { .. })));
     }
 
-    #[test]
-    fn forged_signature_is_rejected() {
+    #[tokio::test]
+    async fn forged_signature_is_rejected() {
         let key = generate_signing_key();
         let attacker = generate_signing_key();
         let env = signed_restart_envelope(&attacker, Some("active")); // signed by the wrong key
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Rejected);
         assert!(exec.ran.lock().unwrap().is_empty(), "nothing runs on a bad signature");
     }
 
-    #[test]
-    fn invalid_unit_name_is_rejected_before_execution() {
+    #[tokio::test]
+    async fn invalid_unit_name_is_rejected_before_execution() {
         let key = generate_signing_key();
         let now = Utc::now();
         let mut env = CommandEnvelope {
@@ -470,7 +581,7 @@ mod tests {
         };
         sign_envelope(&key, &mut env);
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Rejected);
         assert!(exec.ran.lock().unwrap().is_empty());
     }
@@ -484,8 +595,8 @@ mod tests {
         assert!(!is_valid_unit(""));
     }
 
-    #[test]
-    fn failed_precondition_skips_all_steps() {
+    #[tokio::test]
+    async fn failed_precondition_skips_all_steps() {
         let key = generate_signing_key();
         // Precondition demands "failed", but the unit is already "active": the
         // remediation is unnecessary, so nothing should run.
@@ -494,7 +605,7 @@ mod tests {
             EnvelopeOpts { precondition_equals: Some("failed"), ..Default::default() },
         );
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::PreconditionFailed);
         assert_eq!(result.observed_state.as_deref(), Some("active"));
         let ran = exec.ran.lock().unwrap();
@@ -503,8 +614,8 @@ mod tests {
         assert!(matches!(ran[0], Capability::UnitState { .. }));
     }
 
-    #[test]
-    fn met_precondition_runs_steps() {
+    #[tokio::test]
+    async fn met_precondition_runs_steps() {
         let key = generate_signing_key();
         let env = signed_envelope(
             &key,
@@ -518,14 +629,14 @@ mod tests {
         // Precondition sees "failed" (holds). After restart, verify also reads the
         // mock's fixed state "failed", so verify fails — but the precondition phase
         // itself must have let the steps run.
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         let ran = exec.ran.lock().unwrap();
         assert!(ran.iter().any(|c| matches!(c, Capability::RestartUnit { .. })));
         assert_ne!(result.status, ActionStatus::PreconditionFailed);
     }
 
-    #[test]
-    fn verify_failure_triggers_nix_rollback() {
+    #[tokio::test]
+    async fn verify_failure_triggers_nix_rollback() {
         let key = generate_signing_key();
         let env = signed_envelope(
             &key,
@@ -536,7 +647,7 @@ mod tests {
             },
         );
         let exec = MockExecutor::new("failed"); // unit never recovers → verify fails
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         // Rollback ran and succeeded, so the outcome is Failed (not Frozen).
         assert_eq!(result.status, ActionStatus::Failed);
         let ran = exec.ran.lock().unwrap();
@@ -544,8 +655,8 @@ mod tests {
         assert!(result.detail.as_deref().unwrap().contains("rolled back"));
     }
 
-    #[test]
-    fn rollback_failure_freezes_the_target() {
+    #[tokio::test]
+    async fn rollback_failure_freezes_the_target() {
         let key = generate_signing_key();
         let env = signed_envelope(
             &key,
@@ -557,20 +668,175 @@ mod tests {
         );
         let mut exec = MockExecutor::new("failed"); // verify fails
         exec.fail_on_rollback = true; // and the rollback itself fails
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Frozen);
         assert!(result.detail.as_deref().unwrap().contains("frozen"));
     }
 
-    #[test]
-    fn verify_failure_without_rollback_is_plain_failed() {
+    #[tokio::test]
+    async fn verify_failure_without_rollback_is_plain_failed() {
         let key = generate_signing_key();
         // Default rollback is None.
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("failed");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_eq!(result.status, ActionStatus::Failed);
         let ran = exec.ran.lock().unwrap();
         assert!(!ran.iter().any(|c| matches!(c, Capability::NixRollback)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #144 — concurrency test
+    //
+    // Prove that a second command executes to completion while the first is
+    // still in its verify-polling loop. We use two executors:
+    //
+    //   • `SlowVerifyExecutor` — the verify check always returns the wrong
+    //     state, so `handle_command` keeps polling until `timeout_s` expires.
+    //     The timeout is set to 2 s so the test stays fast but gives clear
+    //     headroom.
+    //
+    //   • `FastExecutor` — no verify; completes immediately.
+    //
+    // Both tasks are spawned concurrently. If the async path were still
+    // blocking (e.g. `std::thread::sleep`), the fast task would not complete
+    // until the slow one timed out. We assert the fast task finishes well
+    // before the slow task's deadline.
+    // -------------------------------------------------------------------------
+
+    /// Always returns the wrong unit state so verify polling runs until timeout.
+    struct SlowVerifyExecutor;
+
+    impl CapabilityExecutor for SlowVerifyExecutor {
+        fn run<'a>(&'a self, _cap: &'a Capability) -> ExecFuture<'a> {
+            // Simulate a tiny async delay without blocking the thread.
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(Some("failed".to_string())) // always "failed" → verify never passes
+            })
+        }
+    }
+
+    /// Completes immediately with no verify step.
+    struct FastExecutor;
+
+    impl CapabilityExecutor for FastExecutor {
+        fn run<'a>(&'a self, _cap: &'a Capability) -> ExecFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    fn make_slow_envelope(key: &SigningKey) -> CommandEnvelope {
+        // verify_timeout_s = 2 s, verify always fails → polling runs for ~2 s.
+        signed_envelope(
+            key,
+            EnvelopeOpts {
+                verify_equals: Some("active"), // SlowVerifyExecutor returns "failed" → mismatch
+                verify_timeout_s: 2,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn make_fast_envelope(key: &SigningKey) -> CommandEnvelope {
+        // No verify step — finishes as soon as the two steps succeed.
+        signed_envelope(key, EnvelopeOpts::default())
+    }
+
+    #[tokio::test]
+    async fn second_command_completes_while_first_is_in_verify_polling() {
+        let key = generate_signing_key();
+        let slow_env = make_slow_envelope(&key);
+        let fast_env = make_fast_envelope(&key);
+        let vk = key.verifying_key();
+
+        let start = std::time::Instant::now();
+
+        // Spawn both concurrently. The slow task polls verify for ~2 s.
+        // The fast task should finish in well under 500 ms.
+        let slow_handle = tokio::spawn({
+            let vk = vk.clone();
+            async move { handle_command(&SlowVerifyExecutor, &vk, &slow_env).await }
+        });
+
+        let fast_handle = tokio::spawn({
+            let vk = vk.clone();
+            async move { handle_command(&FastExecutor, &vk, &fast_env).await }
+        });
+
+        // Wait for the fast task first with a tight deadline well under the
+        // slow task's 2 s timeout.
+        let fast_result = tokio::time::timeout(Duration::from_millis(800), fast_handle)
+            .await
+            .expect("fast command timed out — the async path is blocking!")
+            .expect("task panicked");
+
+        let fast_elapsed = start.elapsed();
+
+        // Fast command must have completed successfully in under 800 ms.
+        assert_eq!(
+            fast_result.status,
+            ActionStatus::Succeeded,
+            "fast command should succeed"
+        );
+        assert!(
+            fast_elapsed < Duration::from_millis(800),
+            "fast command took {fast_elapsed:?}, expected < 800 ms"
+        );
+
+        // Now wait for the slow one to finish naturally.
+        let slow_result = slow_handle.await.expect("slow task panicked");
+        assert_eq!(
+            slow_result.status,
+            ActionStatus::Failed,
+            "slow command should fail after verify timeout"
+        );
+    }
+
+    /// Verify polling eventually succeeds when the executor transitions state.
+    ///
+    /// The executor returns "activating" for the first two checks, then "active".
+    /// `handle_command` must succeed once the correct state is observed.
+    #[tokio::test]
+    async fn verify_polling_succeeds_after_state_transition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct TransitioningExecutor {
+            check_count: AtomicUsize,
+        }
+
+        impl CapabilityExecutor for TransitioningExecutor {
+            fn run<'a>(&'a self, cap: &'a Capability) -> ExecFuture<'a> {
+                let n = self.check_count.fetch_add(1, Ordering::SeqCst);
+                let is_state_check = matches!(cap, Capability::UnitState { .. });
+                Box::pin(async move {
+                    if is_state_check {
+                        // First two checks return "activating"; third returns "active".
+                        if n < 2 {
+                            Ok(Some("activating".to_string()))
+                        } else {
+                            Ok(Some("active".to_string()))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                })
+            }
+        }
+
+        let key = generate_signing_key();
+        // Use a 5-second timeout — plenty of room for 2-3 polls at 500 ms each.
+        let env = signed_envelope(
+            &key,
+            EnvelopeOpts {
+                verify_equals: Some("active"),
+                verify_timeout_s: 5,
+                ..Default::default()
+            },
+        );
+        let exec = TransitioningExecutor { check_count: AtomicUsize::new(0) };
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Succeeded);
+        assert_eq!(result.observed_state.as_deref(), Some("active"));
     }
 }

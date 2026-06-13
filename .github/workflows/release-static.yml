@@ -1,0 +1,210 @@
+name: Release static binaries
+
+# Triggered by a semver tag (v*.*.*) pushed to main, or manually.
+# Produces musl-linked x86_64 and aarch64 binaries for ravnd, ravn-server and
+# ravn-actuator, attaches them to a GitHub Release, and uploads them as
+# build artefacts so downstream packaging workflows can fetch them.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (e.g. v0.3.0) — only for manual runs'
+        required: false
+
+# Cancel in-progress runs for the same tag so a re-push doesn't duplicate
+# uploads.
+concurrency:
+  group: release-static-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-static:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch_label: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch_label: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Rust with the exact stable toolchain, add the musl target and
+      # (for aarch64 cross-compilation) the linker that ships with
+      # gcc-aarch64-linux-gnu.
+      - name: Install Rust stable + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache the registry index, downloaded crates and compiled dependencies.
+      # The key includes the Cargo.lock hash so a lockfile bump invalidates it.
+      - name: Cache Cargo artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-musl-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-musl-${{ matrix.target }}-
+
+      # aarch64 cross-compilation needs a C cross-linker; x86_64 needs the
+      # musl libc headers.  Both are satisfied by one of these two packages.
+      - name: Install system cross-build deps
+        run: |
+          sudo apt-get update -qq
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          else
+            sudo apt-get install -y musl-tools
+          fi
+
+      # Tell Cargo which linker to use for the aarch64 cross target.
+      - name: Configure Cargo cross-linker (aarch64 only)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      # Build only the three host-agent binaries; skip the Kubernetes and
+      # eval crates (they have heavy extra deps and are not part of this MVP).
+      # OPENSSL_STATIC=1 + vendored tells the openssl crate to compile its own
+      # libssl rather than link the system one, which is not musl-compatible on
+      # Ubuntu runners.
+      - name: Build ravnd
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_NO_VENDOR: "0"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: |
+          cargo build \
+            --release \
+            --target ${{ matrix.target }} \
+            --package ravn-agent
+
+      - name: Build ravn-server
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_NO_VENDOR: "0"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: |
+          cargo build \
+            --release \
+            --target ${{ matrix.target }} \
+            --package ravn-server
+
+      - name: Build ravn-actuator
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_NO_VENDOR: "0"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: |
+          cargo build \
+            --release \
+            --target ${{ matrix.target }} \
+            --package ravn-actuator
+
+      # Verify the binaries are truly statically linked — fail loudly if not.
+      - name: Verify static linkage
+        run: |
+          for bin in ravnd ravn-server ravn-actuator; do
+            path="target/${{ matrix.target }}/release/${bin}"
+            echo "=== ${path} ==="
+            file "${path}"
+            ldd "${path}" 2>&1 | grep -q "not a dynamic executable\|statically linked" \
+              || { echo "ERROR: ${bin} is NOT statically linked"; exit 1; }
+          done
+
+      # Rename binaries to include the target triple so parallel matrix uploads
+      # don't overwrite each other on the release.
+      - name: Stage artefacts
+        run: |
+          mkdir -p dist
+          for bin in ravnd ravn-server ravn-actuator; do
+            cp "target/${{ matrix.target }}/release/${bin}" \
+               "dist/${bin}-${{ matrix.arch_label }}"
+          done
+          # Also bundle the systemd units and the docker-compose quickstart
+          # so users can grab everything from a single release asset.
+          cp -r dist/systemd dist/ 2>/dev/null || true
+          tar -czf "dist/ravn-${{ matrix.arch_label }}-static.tar.gz" \
+            -C dist \
+            "ravnd-${{ matrix.arch_label }}" \
+            "ravn-server-${{ matrix.arch_label }}" \
+            "ravn-actuator-${{ matrix.arch_label }}"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravn-${{ matrix.arch_label }}-static
+          path: dist/ravn-${{ matrix.arch_label }}-static.tar.gz
+          if-no-files-found: error
+
+  # Collect both matrix artefacts and attach to the GitHub Release.
+  # Runs only when triggered by a tag (not workflow_dispatch without a tag).
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-static
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write  # needed to create a release and upload assets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      # Bundle the systemd units and quickstart doc into the release as a
+      # convenience package so users can wget a single tarball.
+      - name: Add packaging files to release assets
+        run: |
+          tar -czf release-assets/ravn-systemd-units.tar.gz \
+            dist/systemd/ \
+            docs/host-quickstart.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Ravn ${{ github.ref_name }}
+          body: |
+            ## Static binaries
+
+            Statically linked (musl) host-agent binaries for Debian/Ubuntu/RHEL and
+            any other Linux distribution.  No runtime dependencies beyond a kernel ≥ 5.10.
+
+            | File | Description |
+            |------|-------------|
+            | `ravn-x86_64-static.tar.gz` | `ravnd`, `ravn-server`, `ravn-actuator` for x86-64 |
+            | `ravn-aarch64-static.tar.gz` | same for ARM64 (Raspberry Pi 4/5, Ampere, Graviton) |
+            | `ravn-systemd-units.tar.gz` | Ready-to-use systemd unit files + quickstart doc |
+
+            ## 5-minute quickstart
+
+            See [docs/host-quickstart.md](https://github.com/olafkfreund/ravn-agents/blob/${{ github.ref_name }}/docs/host-quickstart.md)
+            for a step-by-step guide: control plane via docker-compose + bare-binary host agent.
+
+            ## Checksums
+
+            SHA-256 sums are printed by each matrix run in the *Build* step logs.
+          files: release-assets/**/*.tar.gz
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

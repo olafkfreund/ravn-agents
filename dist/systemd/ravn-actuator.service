@@ -1,0 +1,82 @@
+# ravn-actuator.service — Ravn privileged remediation actuator (non-NixOS host install)
+#
+# Hardening directives mirror the NixOS module at nixos/modules/agent.nix
+# (services.ravn.agent.ravn-actuator serviceConfig block) exactly.
+#
+# This is the ONLY Ravn component that runs as root.  It:
+#   • listens on a Unix socket owned by group "ravn"
+#   • independently re-verifies the Ed25519 signature on every command before
+#     executing it (hard guarantee; socket ACL is defence-in-depth only)
+#   • has no network access whatsoever (AF_UNIX only, IPAddressDeny=any)
+#
+# The unprivileged ravnd joins the "ravn" group (see ravnd.service) to reach
+# the socket.  The actuator must start before ravnd.
+#
+# Installation:
+#   sudo install -m 644 ravn-actuator.service /etc/systemd/system/
+#   sudo groupadd -r ravn
+#   sudo install -m 755 /path/to/ravn-actuator /usr/local/bin/ravn-actuator
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ravn-actuator.service
+#
+# Required environment (set via a drop-in or EnvironmentFile):
+#   RAVN_ACTUATOR_SOCKET=/run/ravn/actuator.sock
+#   RAVN_COMMAND_PUBKEY=<base64 Ed25519 public key from enrollment>
+
+[Unit]
+Description=Ravn privileged remediation actuator
+Documentation=https://github.com/olafkfreund/ravn-agents
+# Must be ready before ravnd tries to connect.
+Before=ravnd.service
+
+[Service]
+# ---- Binary ----
+ExecStart=/usr/local/bin/ravn-actuator
+Restart=on-failure
+RestartSec=5
+
+# ---- Identity ----
+# Root (needs to restart units via systemd D-Bus) but group "ravn" so the
+# socket is group-owned and reachable by the unprivileged ravnd.
+User=root
+Group=ravn
+
+# /run/ravn is created on each boot; mode 0750 so the "ravn" group can connect.
+RuntimeDirectory=ravn
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# ---- Environment ----
+# Override these in a drop-in or via EnvironmentFile=/etc/ravn/actuator.env
+Environment=RAVN_ACTUATOR_SOCKET=/run/ravn/actuator.sock
+# Set RAVN_COMMAND_PUBKEY to the base64 Ed25519 public key printed during
+# enrollment:
+#   Environment=RAVN_COMMAND_PUBKEY=MCowBQYDK2VwAyEA...
+# or use a drop-in:
+#   EnvironmentFile=/etc/ravn/actuator.env
+
+# ---- Hardening (mirrors nixos/modules/agent.nix ravn-actuator block) ----
+# No network at all; only AF_UNIX to systemd D-Bus and its own socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

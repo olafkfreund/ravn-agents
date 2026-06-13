@@ -2435,6 +2435,7 @@ dependencies = [
  "futures-util",
  "hex",
  "notify",
+ "rand 0.8.6",
  "ravn-core",
  "ravn-crypto",
  "rcgen",

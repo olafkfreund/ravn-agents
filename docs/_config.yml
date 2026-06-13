@@ -20,6 +20,7 @@ header_pages:
   - blog.md
   - roadmap.md
   - architecture.md
+  - kubernetes-install.md
   - get-involved.md
 
 # Posts don't carry a `layout:`; default them to the post layout.

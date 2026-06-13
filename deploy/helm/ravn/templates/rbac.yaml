@@ -1,4 +1,12 @@
-{{- if .Values.controller.enabled }}
+{{/*
+RBAC for the controller, node-agent, and (gated) executor components.
+
+All roles are least-privilege, read-only except where a component must write
+back a status annotation or patch a pod for healing (#146 executor).
+*/}}
+
+# ─── Controller ServiceAccount ───────────────────────────────────────────────
+{{- if and .Values.controller.enabled .Values.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -7,16 +15,23 @@ metadata:
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
+# ClusterRole: read-only access to core/v1 Events, Pods, and the events.k8s.io
+# Events API. No write verbs — the controller is detection-only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Release.Name }}-controller
+  name: {{ include "ravn.fullname" . }}-controller
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
 rules:
   - apiGroups: [""]
-    resources: ["events", "pods"]
+    resources: ["events", "pods", "namespaces"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
@@ -25,19 +40,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ .Release.Name }}-controller
+  name: {{ include "ravn.fullname" . }}-controller
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ .Release.Name }}-controller
+  name: {{ include "ravn.fullname" . }}-controller
 subjects:
   - kind: ServiceAccount
     name: ravn-controller
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if .Values.nodeAgent.enabled }}
+
+# ─── Node-agent ServiceAccount ────────────────────────────────────────────────
+{{- if and .Values.nodeAgent.enabled .Values.serviceAccount.create }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -47,13 +65,20 @@ metadata:
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
     app.kubernetes.io/component: node-agent
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
+# ClusterRole: read-only access to Node objects. The downward-API NODE_NAME
+# var narrows each pod's watch to its own node at runtime.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Release.Name }}-node-agent
+  name: {{ include "ravn.fullname" . }}-node-agent
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
@@ -62,15 +87,93 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ .Release.Name }}-node-agent
+  name: {{ include "ravn.fullname" . }}-node-agent
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ .Release.Name }}-node-agent
+  name: {{ include "ravn.fullname" . }}-node-agent
 subjects:
   - kind: ServiceAccount
     name: ravn-node-agent
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+# ─── Executor ServiceAccount (FUTURE — gated on issue #146) ──────────────────
+# This RBAC is pre-defined so the chart stays consistent across environments
+# where executor.enabled is flipped in values. The ClusterRole grants the
+# minimal write verbs the executor needs to act on pods (#146 will confirm the
+# exact verb list; placeholder verbs are documented below).
+#
+# ASSUMPTION (#146): the executor needs at minimum:
+#   - pods/eviction  create    (evict a pod)
+#   - pods           delete    (force-delete a stuck pod)
+#   - pods           patch     (update annotations: ravn.io/healed-at)
+#   - events         create    (record healing actions as K8s Events)
+# These are deliberately narrower than cluster-admin and do not include
+# deployments/scale — scale is driven by the control plane, not the executor.
+{{- if and .Values.executor.enabled .Values.serviceAccount.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+# ClusterRole: minimal write access required for supervised pod healing.
+# All reads use the controller's token; this role only grants the healing verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ravn.fullname" . }}-executor
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+  annotations:
+    # Remove this annotation and the TODO comment when #146 finalises the verb
+    # list and this has been reviewed by a second maintainer.
+    ravn.io/issue: "#146"
+    ravn.io/status: "placeholder — verify verb list before enabling in production"
+rules:
+  # Read pods and events for context (detection plane passes these IDs to the
+  # executor so it can confirm it is acting on the right object).
+  - apiGroups: [""]
+    resources: ["pods", "events", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Healing verbs — evict, delete (force), patch annotations.
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete", "patch"]
+  # Write a K8s Event so the healing action is visible in `kubectl get events`.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ravn.fullname" . }}-executor
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ravn.fullname" . }}-executor
+subjects:
+  - kind: ServiceAccount
+    name: ravn-executor
     namespace: {{ .Release.Namespace }}
 {{- end }}

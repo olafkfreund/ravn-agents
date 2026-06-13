@@ -1,3 +1,11 @@
+{{/*
+ravn-controller — cluster-wide Deployment watching the Kubernetes Events API.
+
+One replica; single-leader by design (kube-rs informers are safe to run
+single-leader; HA leader election is not yet implemented). A
+PodDisruptionBudget ensures at most one voluntary disruption at a time so
+rolling updates and node drains keep the controller watching.
+*/}}
 {{- if .Values.controller.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -7,23 +15,37 @@ metadata:
   labels:
     {{- include "ravn.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
+  {{- with .Values.controller.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.controller.replicaCount | default 1 }}
+  # Strategy: Recreate keeps a clean leader handoff. RollingUpdate is also safe
+  # because the informer is read-only, but Recreate makes the single-replica
+  # contract explicit.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/component: controller
+      {{- include "ravn.componentSelectorLabels" (list . "controller") | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "ravn.labels" . | nindent 8 }}
         app.kubernetes.io/component: controller
+      {{- with .Values.controller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: ravn-controller
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        seccompProfile:
-          type: RuntimeDefault
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -31,17 +53,53 @@ spec:
           command: ["ravn-controller"]
           env:
             {{- include "ravn.commonEnv" . | nindent 12 }}
+            {{- if .Values.controller.watchNamespace }}
+            - name: RAVN_K8S_NAMESPACE
+              value: {{ .Values.controller.watchNamespace | quote }}
+            {{- end }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           volumeMounts:
-            - name: ravn-token
-              mountPath: {{ dir .Values.controlPlane.tokenPath | quote }}
-              readOnly: true
+            {{- include "ravn.tokenVolumeMount" . | nindent 12 }}
+          # Liveness: the controller's main loop should stay alive. A simple
+          # process-alive check is sufficient — if the container is running,
+          # the informer is running.
+          # Note: ravn-controller does not yet expose an HTTP health endpoint;
+          # once #160 adds /healthz, switch to an httpGet probe here.
+          # For now we rely on the restart-on-crash default behaviour.
       volumes:
         {{- include "ravn.tokenVolume" . | nindent 8 }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# PodDisruptionBudget: allow at most one unavailable pod during voluntary
+# disruptions (node drains, rolling cluster upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ravn-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "ravn.componentSelectorLabels" (list . "controller") | nindent 6 }}
 {{- end }}

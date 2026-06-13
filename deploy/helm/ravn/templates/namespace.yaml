@@ -1,0 +1,14 @@
+{{/*
+Namespace object — only rendered when the chart is asked to manage it.
+`helm install --create-namespace` creates the namespace imperatively; this
+template is for GitOps workflows where the namespace must be declarative and
+part of the release. Enable with: --set namespace.create=true
+*/}}
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "ravn.labels" . | nindent 4 }}
+{{- end }}

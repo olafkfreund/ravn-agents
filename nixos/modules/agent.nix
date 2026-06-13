@@ -358,6 +358,18 @@ in
         message = "services.ravn.agent.server.url must be set.";
       }
       {
+        # Air-gapped safety: model.url triggers pkgs.fetchurl which requires
+        # internet on the Nix build host.  In an air-gapped deployment always
+        # use model.path to point at a pre-copied GGUF file.
+        assertion = !(cfg.inference.enable
+          && cfg.inference.model.url != null
+          && cfg.inference.model.path != null);
+        message = ''
+          services.ravn.agent.inference.model: set either `path` (air-gapped,
+          preferred) or `url`+`sha256`, not both.
+        '';
+      }
+      {
         assertion = !cfg.remediation.enable || cfg.enrollment.endpoint != null;
         message = ''
           services.ravn.agent.remediation requires services.ravn.agent.enrollment.endpoint
@@ -373,6 +385,19 @@ in
         '';
       }
     ];
+
+    # Warn when model.url is set: it calls pkgs.fetchurl, which requires
+    # internet access on the *build* host (not the target host).  For fully
+    # air-gapped deployments always use model.path instead.
+    warnings = optional
+      (cfg.inference.enable && cfg.inference.model.url != null)
+      ''
+        services.ravn.agent.inference.model.url is set.  pkgs.fetchurl will
+        download the model during `nix build` — the build host must have
+        internet access.  For air-gapped deployments use model.path instead
+        (pre-copy the GGUF file and point path at it).
+        See docs/airgapped-install.md for the transfer procedure.
+      '';
 
     # Shared group so the unprivileged ravnd can reach the actuator's socket
     # (the actuator runs as root but with this group, so the socket is group-owned).

@@ -161,6 +161,12 @@
             # so it runs in its own CI job (.github/workflows/vmtest.yml) rather than
             # gating every PR via `nix flake check`.
             remediation-e2e = import ./nixos/tests/remediation.nix { inherit self pkgs; };
+            # Air-gapped heal-loop VM test (#153): same signed heal path but with
+            # outbound networking blocked at the firewall level and RAVN_AIRGAPPED=1
+            # set.  Runs without a real model (inference is disabled) so it fits in
+            # the standard CI RAM budget.  Kept out of `checks` for the same reason
+            # as the remediation e2e above.
+            airgapped-e2e = import ./nixos/tests/airgapped.nix { inherit self pkgs; };
           };
 
           checks = {
@@ -243,6 +249,105 @@
               enable = true;
               bind = "0.0.0.0:8080";
             };
+          })
+        ];
+      };
+
+      # ── Air-gapped configurations (#153) ──────────────────────────────────
+      # These two configurations are the canonical reference for deploying Ravn
+      # in a network-isolated environment.  See nixos/configurations/airgapped.nix
+      # and docs/airgapped-install.md for full documentation.
+      #
+      # They evaluate as container profiles (no bootloader/disk layout) so
+      # `nix flake check` and CI can evaluate them cheaply.
+      #
+      # To deploy on bare metal: remove `boot.isContainer = true` and add
+      # your hardware-specific boot and filesystem configuration.
+      nixosConfigurations.airgap-control-plane = nixpkgs.lib.nixosSystem {
+        modules = [
+          self.nixosModules.controlPlane
+          ({ ... }: {
+            nixpkgs.hostPlatform = "x86_64-linux";
+            boot.isContainer = true;
+            system.stateVersion = "25.05";
+            networking.hostName = "ravn-control";
+
+            services.ravn.controlPlane = {
+              enable = true;
+              # Bind to all interfaces; put a reverse proxy with mTLS in front.
+              bind = "0.0.0.0:8080";
+              database.createLocally = true;
+              nats.createLocally = true;
+              enrollment = {
+                enable = true;
+                # CA cert is public — safe to reference from the store.
+                caCertFile = "/etc/ravn/ca.crt";
+                # Key and token arrive as systemd credentials; never in the store.
+                caKeyFile = "/run/secrets/ravn-ca-key";
+                bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
+                certTtlDays = 365;
+              };
+            };
+
+            # Block outbound JWKS URL fetches; all OIDC docs must be local files.
+            systemd.services.ravn-server.environment.RAVN_AIRGAPPED = "1";
+
+            # Deny all forward routing — this host has no internet path.
+            networking.firewall.enable = true;
+            networking.firewall.extraCommands = "iptables -P FORWARD DROP";
+            # Allow agents on the internal network to reach the API.
+            networking.firewall.allowedTCPPorts = [ 8080 ];
+          })
+        ];
+      };
+
+      nixosConfigurations.airgap-agent = nixpkgs.lib.nixosSystem {
+        modules = [
+          self.nixosModules.agent
+          ({ ... }: {
+            nixpkgs.hostPlatform = "x86_64-linux";
+            boot.isContainer = true;
+            system.stateVersion = "25.05";
+            networking.hostName = "ravn-node-01";
+
+            services.ravn.agent = {
+              enable = true;
+              # Internal NATS — never touches the internet.
+              server.url = "nats://ravn-control.internal.example.com:4222";
+              enrollment = {
+                endpoint = "https://ravn-control.internal.example.com:8080";
+                bootstrapTokenFile = "/run/secrets/ravn-bootstrap-token";
+              };
+              detection = {
+                journald.enable = true;
+                failedUnits.enable = true;
+                configDrift.paths = [ "/etc/nixos" "/etc/ssh/sshd_config" ];
+                auth.enable = true;
+                updates.enable = true;
+              };
+              inference = {
+                enable = true;
+                # Use `path`, not `url` — the model must be pre-copied to the host.
+                # See docs/airgapped-install.md for the transfer procedure.
+                model = {
+                  name = "qwen3-1.7b-q4_k_m";
+                  path = "/var/lib/ravn/models/qwen3-1.7b-q4_k_m.gguf";
+                  # url is intentionally absent: setting it would trigger a
+                  # pkgs.fetchurl download on the build host.
+                };
+                host = "127.0.0.1";
+                port = 18181;
+              };
+              remediation = {
+                enable = true;
+                # Replace with the actual public key from your control plane.
+                commandSigningPublicKey = "REPLACE_WITH_BASE64_ED25519_PUBKEY";
+                pollSecs = 10;
+              };
+            };
+
+            networking.firewall.enable = true;
+            networking.firewall.extraCommands = "iptables -P FORWARD DROP";
           })
         ];
       };

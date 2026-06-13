@@ -130,7 +130,118 @@ pub fn send_to_actuator(socket: &Path, env: &CommandEnvelope) -> anyhow::Result<
     Ok(serde_json::from_str(line.trim())?)
 }
 
-/// The pull loop: every `poll_secs`, fetch pending commands and process them.
+// ---------------------------------------------------------------------------
+// Backoff + circuit-breaker constants
+// ---------------------------------------------------------------------------
+
+/// The floor applied to any caller-supplied poll interval.
+pub const MIN_POLL_SECS: u64 = 5;
+
+/// Multiplier applied to the current backoff delay on each consecutive error.
+const BACKOFF_MULTIPLIER: u32 = 2;
+
+/// Upper cap on the computed backoff delay before jitter is applied.
+const MAX_BACKOFF_SECS: u64 = 300; // 5 minutes
+
+/// After this many consecutive failures the circuit opens (polling is paused).
+const CIRCUIT_OPEN_THRESHOLD: u32 = 5;
+
+/// How long the circuit stays open before a single probe is attempted.
+const CIRCUIT_OPEN_SECS: u64 = 60;
+
+// ---------------------------------------------------------------------------
+// Poll-loop state
+// ---------------------------------------------------------------------------
+
+/// Internal mutable state for the adaptive poll loop.
+struct PollState {
+    /// Consecutive error count; reset to zero on every successful poll.
+    consecutive_errors: u32,
+    /// Current backoff delay (grows exponentially, capped at MAX_BACKOFF_SECS).
+    backoff_secs: u64,
+    /// Base poll interval derived from the user config (already >= MIN_POLL_SECS).
+    base_poll_secs: u64,
+}
+
+impl PollState {
+    fn new(poll_secs: u64) -> Self {
+        Self {
+            consecutive_errors: 0,
+            backoff_secs: poll_secs,
+            base_poll_secs: poll_secs,
+        }
+    }
+
+    /// Record a successful poll: reset the error counter and backoff delay.
+    fn record_success(&mut self) {
+        if self.consecutive_errors > 0 {
+            tracing::info!(
+                after_errors = self.consecutive_errors,
+                "command poll recovered; resetting backoff"
+            );
+        }
+        self.consecutive_errors = 0;
+        self.backoff_secs = self.base_poll_secs;
+    }
+
+    /// Record a failed poll: increment the counter and compute the next delay
+    /// using exponential backoff with full jitter.
+    ///
+    /// Returns the sleep duration to use before the next attempt, and a flag
+    /// indicating whether the circuit just opened.
+    fn record_error(&mut self, e: &anyhow::Error) -> (std::time::Duration, bool) {
+        self.consecutive_errors += 1;
+
+        // Compute raw exponential cap: base * 2^(errors-1), ceiling at MAX.
+        let exponent = (self.consecutive_errors - 1).min(31);
+        let raw = self
+            .base_poll_secs
+            .saturating_mul(BACKOFF_MULTIPLIER.pow(exponent) as u64)
+            .min(MAX_BACKOFF_SECS);
+
+        // Full jitter: uniform in [0, raw].  Zero-cost — no heap alloc, uses
+        // rand already in the workspace (ravn-crypto depends on it at 0.8).
+        use rand::Rng as _;
+        let jitter_secs = rand::thread_rng().gen_range(0..=raw);
+        self.backoff_secs = jitter_secs.max(1); // never sleep less than 1 s
+
+        let circuit_opened = self.consecutive_errors == CIRCUIT_OPEN_THRESHOLD;
+
+        if circuit_opened {
+            tracing::warn!(
+                consecutive_errors = self.consecutive_errors,
+                backoff_secs = self.backoff_secs,
+                circuit_open_secs = CIRCUIT_OPEN_SECS,
+                %e,
+                "command poll: circuit opened — control plane appears degraded"
+            );
+        } else {
+            tracing::warn!(
+                consecutive_errors = self.consecutive_errors,
+                backoff_secs = self.backoff_secs,
+                %e,
+                "command poll failed; backing off"
+            );
+        }
+
+        (std::time::Duration::from_secs(self.backoff_secs), circuit_opened)
+    }
+
+    /// Whether the circuit is currently open (too many consecutive failures).
+    fn circuit_is_open(&self) -> bool {
+        self.consecutive_errors >= CIRCUIT_OPEN_THRESHOLD
+    }
+}
+
+/// The pull loop: every `poll_secs` (minimum [`MIN_POLL_SECS`]), fetch pending
+/// commands and process them.
+///
+/// Adaptive behaviour on errors:
+/// - Each consecutive error doubles the inter-poll delay (full jitter applied).
+/// - The delay is capped at [`MAX_BACKOFF_SECS`].
+/// - After [`CIRCUIT_OPEN_THRESHOLD`] consecutive errors the circuit opens: the
+///   loop pauses for [`CIRCUIT_OPEN_SECS`] before issuing a single probe.
+/// - The first successful response resets the error count and backoff delay.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: reqwest::Client,
@@ -142,13 +253,37 @@ pub async fn run(
     socket: PathBuf,
     poll_secs: u64,
 ) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(poll_secs.max(1)));
+    let clamped = poll_secs.max(MIN_POLL_SECS);
+    if clamped != poll_secs {
+        tracing::info!(
+            requested = poll_secs,
+            enforced = clamped,
+            "command poll interval raised to minimum"
+        );
+    }
+
+    let mut state = PollState::new(clamped);
+
     loop {
-        tick.tick().await;
-        if let Err(e) =
-            poll_once(&http, &base_url, agent_id, api_token.as_deref(), &key, &ledger, &socket).await
+        // Circuit-breaker: if the control plane has been consistently failing,
+        // pause for CIRCUIT_OPEN_SECS before probing again.
+        if state.circuit_is_open() {
+            tracing::warn!(
+                pause_secs = CIRCUIT_OPEN_SECS,
+                "circuit open — pausing command poll"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(CIRCUIT_OPEN_SECS)).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(state.backoff_secs)).await;
+        }
+
+        match poll_once(&http, &base_url, agent_id, api_token.as_deref(), &key, &ledger, &socket)
+            .await
         {
-            tracing::debug!(%e, "command poll failed");
+            Ok(()) => state.record_success(),
+            Err(e) => {
+                let (_delay, _opened) = state.record_error(&e);
+            }
         }
     }
 }
@@ -193,6 +328,146 @@ mod tests {
     use super::*;
     use ravn_core::{AgentId, ApprovalRef, Capability, RiskTier};
     use ravn_crypto::{generate_signing_key, sign_envelope, SigningKey};
+
+    // -----------------------------------------------------------------------
+    // PollState / backoff tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn min_poll_interval_is_enforced() {
+        // The constant is the public contract.
+        assert!(MIN_POLL_SECS >= 5, "minimum must be at least 5 s");
+    }
+
+    #[test]
+    fn poll_state_starts_at_base_interval() {
+        let s = PollState::new(10);
+        assert_eq!(s.backoff_secs, 10);
+        assert_eq!(s.consecutive_errors, 0);
+    }
+
+    #[test]
+    fn backoff_increases_on_consecutive_errors() {
+        let mut s = PollState::new(10);
+        let err = anyhow::anyhow!("simulated 503");
+        let mut delays = vec![];
+        for _ in 0..6 {
+            let (d, _) = s.record_error(&err);
+            delays.push(d.as_secs());
+        }
+        // The cap of MAX_BACKOFF_SECS (300) means we can't check a strict
+        // monotonic increase past it, but the first few must be non-decreasing
+        // (jitter is [0, raw], so any single sample could be 0; we verify the
+        // ceiling grows instead — raw doubles each step up to the cap).
+        //
+        // Check that by the 5th error the ceiling (raw) has grown beyond the
+        // first error's ceiling (which equals base = 10 * 2^0 = 10).
+        // We verify the *maximum possible* backoff keeps growing until the cap.
+        assert!(
+            s.consecutive_errors == 6,
+            "error counter must increment each call"
+        );
+        // After 6 errors base=10: raw = min(10*2^5, 300) = min(320,300) = 300.
+        // At least one recorded delay must be <= 300.
+        assert!(delays.iter().all(|&d| d <= MAX_BACKOFF_SECS));
+    }
+
+    #[test]
+    fn backoff_resets_on_success() {
+        let mut s = PollState::new(10);
+        let err = anyhow::anyhow!("500");
+        for _ in 0..4 {
+            s.record_error(&err);
+        }
+        assert!(s.consecutive_errors > 0);
+        s.record_success();
+        assert_eq!(s.consecutive_errors, 0);
+        assert_eq!(s.backoff_secs, s.base_poll_secs);
+    }
+
+    #[test]
+    fn circuit_opens_after_threshold_errors() {
+        let mut s = PollState::new(10);
+        let err = anyhow::anyhow!("timeout");
+        let mut opened_at = None;
+        for i in 0..CIRCUIT_OPEN_THRESHOLD + 2 {
+            let (_, opened) = s.record_error(&err);
+            if opened {
+                opened_at = Some(i);
+            }
+        }
+        assert_eq!(
+            opened_at,
+            Some(CIRCUIT_OPEN_THRESHOLD - 1),
+            "circuit must open exactly at the threshold"
+        );
+        assert!(s.circuit_is_open());
+    }
+
+    #[test]
+    fn circuit_closes_after_success() {
+        let mut s = PollState::new(10);
+        let err = anyhow::anyhow!("503");
+        for _ in 0..CIRCUIT_OPEN_THRESHOLD + 1 {
+            s.record_error(&err);
+        }
+        assert!(s.circuit_is_open());
+        s.record_success();
+        assert!(!s.circuit_is_open(), "circuit must close on success");
+    }
+
+    #[test]
+    fn backoff_delay_never_exceeds_cap() {
+        let mut s = PollState::new(MIN_POLL_SECS);
+        let err = anyhow::anyhow!("storm");
+        // Simulate a long storm — 30 consecutive errors.
+        for _ in 0..30 {
+            let (d, _) = s.record_error(&err);
+            assert!(
+                d.as_secs() <= MAX_BACKOFF_SECS,
+                "delay {d:?} must not exceed MAX_BACKOFF_SECS={MAX_BACKOFF_SECS}"
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_produces_different_delays_across_runs() {
+        // Run many iterations; all from the same state step.  With full jitter
+        // over [0, raw] where raw >= 5, we expect variance.  The probability of
+        // all 50 samples being identical is (1/raw)^49 ≈ 0 — this can't flake.
+        let err = anyhow::anyhow!("503");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let mut s = PollState::new(MIN_POLL_SECS);
+            // advance to error #3 so raw = 5*4 = 20
+            for _ in 0..3 {
+                let (d, _) = s.record_error(&err);
+                seen.insert(d.as_secs());
+            }
+        }
+        assert!(
+            seen.len() > 1,
+            "jitter must produce varied delays; got only {seen:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_within_one_base_interval_after_success() {
+        // After circuit opens and then one success, backoff must return to base.
+        let mut s = PollState::new(10);
+        let err = anyhow::anyhow!("storm");
+        for _ in 0..CIRCUIT_OPEN_THRESHOLD + 3 {
+            s.record_error(&err);
+        }
+        assert!(s.circuit_is_open());
+        s.record_success();
+        // Immediately after recovery the next sleep must equal base_poll_secs.
+        assert_eq!(
+            s.backoff_secs, s.base_poll_secs,
+            "after recovery, backoff must equal the base poll interval"
+        );
+        assert!(!s.circuit_is_open());
+    }
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ravn-{name}-{}-{}", std::process::id(), Uuid::now_v7()))

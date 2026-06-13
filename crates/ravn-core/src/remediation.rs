@@ -52,13 +52,19 @@ pub enum Capability {
     /// Roll the host back to its previous NixOS generation — the universal net
     /// used by [`Rollback::NixGeneration`]. Targets no unit.
     NixRollback,
+    /// Delete a Kubernetes pod in a namespace.
+    DeletePod { namespace: String, name: String },
+    /// Restart a Kubernetes deployment (rollout restart).
+    RestartDeployment { namespace: String, name: String },
+    /// Read-only: get the phase/status of a Kubernetes pod.
+    PodState { namespace: String, name: String },
 }
 
 impl Capability {
     /// Whether this capability only observes (never mutates) host state. Used to
     /// constrain which capabilities may appear in pre/post-condition checks.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Capability::UnitState { .. })
+        matches!(self, Capability::UnitState { .. } | Capability::PodState { .. })
     }
 
     /// Resolve `{{param}}` placeholders in this capability's string fields against
@@ -76,6 +82,24 @@ impl Capability {
             }
             // No string fields to resolve.
             Capability::NixRollback => Capability::NixRollback,
+            Capability::DeletePod { namespace, name } => {
+                Capability::DeletePod {
+                    namespace: resolve_str(namespace, values)?,
+                    name: resolve_str(name, values)?,
+                }
+            }
+            Capability::RestartDeployment { namespace, name } => {
+                Capability::RestartDeployment {
+                    namespace: resolve_str(namespace, values)?,
+                    name: resolve_str(name, values)?,
+                }
+            }
+            Capability::PodState { namespace, name } => {
+                Capability::PodState {
+                    namespace: resolve_str(namespace, values)?,
+                    name: resolve_str(name, values)?,
+                }
+            }
         })
     }
 }
@@ -274,14 +298,20 @@ pub fn resolve_str(raw: &str, values: &BTreeMap<String, String>) -> Result<Strin
 
 /// Collect the placeholder names referenced by a capability's string fields.
 fn placeholders_in_capability(cap: &Capability) -> Vec<String> {
-    let field = match cap {
+    match cap {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
-        | Capability::UnitState { unit } => unit,
+        | Capability::UnitState { unit } => placeholders_in_str(unit),
+        Capability::DeletePod { namespace, name }
+        | Capability::RestartDeployment { namespace, name }
+        | Capability::PodState { namespace, name } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(name));
+            v
+        }
         // No string fields, so no placeholders.
-        Capability::NixRollback => return Vec::new(),
-    };
-    placeholders_in_str(field)
+        Capability::NixRollback => Vec::new(),
+    }
 }
 
 fn placeholders_in_str(raw: &str) -> Vec<String> {

@@ -61,17 +61,54 @@ impl TemplateRegistry {
         Ok(Self { templates })
     }
 
-    /// The first template whose match source equals the event's source.
-    /// (Richer `conditions` matching is part of the policy work, #116.)
+    /// The first template whose match source equals the event's source and matches its conditions.
     pub fn match_event(&self, event: &Event) -> Option<&Template> {
         let source = event.source();
-        self.templates.iter().find(|t| t.match_.source == source)
+        self.templates.iter().find(|t| {
+            t.match_.source == source && match_conditions(&t.match_.conditions, event)
+        })
     }
 
     /// Look a template up by id.
     pub fn get(&self, id: &str) -> Option<&Template> {
         self.templates.iter().find(|t| t.id == id)
     }
+}
+
+fn match_conditions(conditions: &BTreeMap<String, String>, event: &Event) -> bool {
+    let Ok(event_json) = serde_json::to_value(event) else { return false; };
+    for (path, expected) in conditions {
+        // Try resolving dotted path
+        let mut cur = &event_json;
+        let mut resolved = true;
+        for segment in path.split('.') {
+            if let Some(next) = cur.get(segment) {
+                cur = next;
+            } else {
+                resolved = false;
+                break;
+            }
+        }
+        if resolved {
+            if let Some(val_str) = cur.as_str() {
+                if val_str == expected {
+                    continue;
+                }
+            }
+        }
+        // Fallback: check in payload directly if not resolved
+        if let Some(payload) = event_json.get("payload") {
+            if let Some(val) = payload.get(path) {
+                if let Some(val_str) = val.as_str() {
+                    if val_str == expected {
+                        continue;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    true
 }
 
 /// Resolve a template's declared parameters against an event by navigating the
@@ -411,6 +448,8 @@ mod tests {
 
     fn failed_unit_event(unit: &str) -> Event {
         let now = Utc::now();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("active_state".to_string(), serde_json::json!("failed"));
         Event {
             id: Uuid::now_v7(),
             occurred_at: now,
@@ -423,6 +462,7 @@ mod tests {
             payload: Payload::FailedUnit(FailedUnitPayload {
                 unit: unit.into(),
                 result: "exit-code".into(),
+                extra,
                 ..Default::default()
             }),
         }

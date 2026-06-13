@@ -1,0 +1,30 @@
+# P1 Kubernetes remediation template: delete a pod when it becomes unhealthy.
+# Safe tier — idempotent, no data loss.
+id = "k8s-pod-restart"
+version = 1
+title = "Restart unhealthy Kubernetes pod"
+risk_tier = "safe"
+
+[match]
+source = "kube_workload"
+conditions = { "payload.reason" = "Unhealthy", "payload.object_kind" = "Pod" }
+
+[parameters]
+namespace = { type = "string", from = "payload.namespace" }
+name = { type = "string", from = "payload.name" }
+
+[[preconditions]]
+equals = "Running"
+check = { capability = "pod_state", namespace = "{{namespace}}", name = "{{name}}" }
+
+[[steps]]
+capability = "delete_pod"
+namespace = "{{namespace}}"
+name = "{{name}}"
+
+[verify]
+equals = "NotFound"
+timeout_s = 30
+check = { capability = "pod_state", namespace = "{{namespace}}", name = "{{name}}" }
+
+rollback = "none"

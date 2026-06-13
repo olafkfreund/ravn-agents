@@ -64,9 +64,28 @@ export function AgentDrawer({
         aria-modal="true"
       >
         <div className="flex items-start gap-3 border-b border-line p-5">
-          <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: s.dot }} />
+          <span className="relative mt-1.5 flex h-2.5 w-2.5 shrink-0">
+            {agent.status === "online" && <span className="animate-radar" />}
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ background: s.dot }} />
+          </span>
           <div className="min-w-0 flex-1">
-            <div className={`text-xs font-semibold uppercase tracking-wide ${s.text}`}>{s.label}</div>
+            <div className="flex items-center gap-2">
+              <div className={`text-xs font-semibold uppercase tracking-wide ${s.text}`}>{s.label}</div>
+              {agent.status === "online" && (
+                <svg
+                  className="h-4 w-12 text-sev-notice"
+                  viewBox="0 0 50 20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path className="animate-ekg-bg" opacity="0.15" d="M 0 10 H 12 L 15 3 L 18 17 L 21 0 L 24 20 L 27 10 H 30 L 33 6 L 36 10 H 50" />
+                  <path className="animate-ekg-pulse" d="M 0 10 H 12 L 15 3 L 18 17 L 21 0 L 24 20 L 27 10 H 30 L 33 6 L 36 10 H 50" />
+                </svg>
+              )}
+            </div>
             <h2 className="mt-0.5 font-display text-xl font-bold leading-snug">{agent.host}</h2>
           </div>
           <button

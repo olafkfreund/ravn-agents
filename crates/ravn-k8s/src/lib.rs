@@ -17,3 +17,4 @@ pub mod nats;
 pub mod node;
 pub mod publish;
 pub mod watcher;
+pub mod logs;

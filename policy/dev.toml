@@ -1,0 +1,5 @@
+# Dev policy: auto-execute safe remediations on any host
+[[rule]]
+host = "*"
+tier = "safe"
+decision = "auto"

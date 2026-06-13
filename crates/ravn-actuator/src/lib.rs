@@ -20,6 +20,10 @@ use ravn_crypto::{verify_envelope, VerifyingKey};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::apps::v1::Deployment;
+use kube::{Api, Client, api::{DeleteParams, PatchParams, Patch}};
+
 /// Executes a single capability. Mutating capabilities return `Ok(None)`;
 /// read-only checks return the observed value.
 pub trait CapabilityExecutor: Send + Sync {
@@ -55,7 +59,10 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
         | Capability::UnitState { unit } => Some(unit),
-        Capability::NixRollback => None,
+        Capability::NixRollback
+        | Capability::DeletePod { .. }
+        | Capability::RestartDeployment { .. }
+        | Capability::PodState { .. } => None,
     }
 }
 
@@ -128,22 +135,31 @@ pub fn handle_command(
     // 5. Verify post-condition, if declared. On failure, perform the declared
     //    rollback before reporting (#117).
     if let Some(verify) = &env.verify {
-        match executor.run(&verify.check) {
-            Ok(observed) => {
-                let observed = observed.unwrap_or_default();
-                if observed != verify.equals {
-                    let detail = format!(
-                        "verify failed: expected {:?}, observed {:?}",
-                        verify.equals, observed
-                    );
-                    return perform_rollback(executor, env, detail, observed);
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(verify.timeout_s.max(1));
+        loop {
+            match executor.run(&verify.check) {
+                Ok(observed) => {
+                    let observed = observed.unwrap_or_default();
+                    if observed == verify.equals {
+                        return result(ActionStatus::Succeeded, None, Some(observed));
+                    }
+                    if start.elapsed() >= timeout {
+                        let detail = format!(
+                            "verify failed: expected {:?}, observed {:?}",
+                            verify.equals, observed
+                        );
+                        return perform_rollback(executor, env, detail, observed);
+                    }
                 }
-                return result(ActionStatus::Succeeded, None, Some(observed));
+                Err(e) => {
+                    if start.elapsed() >= timeout {
+                        let detail = format!("verify check errored: {e}");
+                        return perform_rollback(executor, env, detail, String::new());
+                    }
+                }
             }
-            Err(e) => {
-                let detail = format!("verify check errored: {e}");
-                return perform_rollback(executor, env, detail, String::new());
-            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
 
@@ -222,6 +238,61 @@ impl CapabilityExecutor for SystemctlExecutor {
                 ))
                 .arg("switch"))?;
                 Ok(None)
+            }
+            Capability::DeletePod { namespace, name } => {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let client = Client::try_default().await
+                            .map_err(|e| ExecError(format!("kube client: {e}")))?;
+                        let api: Api<Pod> = Api::namespaced(client, namespace);
+                        api.delete(name, &DeleteParams::default()).await
+                            .map_err(|e| ExecError(format!("delete pod: {e}")))?;
+                        Ok::<Option<String>, ExecError>(None)
+                    })
+                })
+            }
+            Capability::RestartDeployment { namespace, name } => {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let client = Client::try_default().await
+                            .map_err(|e| ExecError(format!("kube client: {e}")))?;
+                        let api: Api<Deployment> = Api::namespaced(client, namespace);
+                        let now = Utc::now().to_rfc3339();
+                        let patch = serde_json::json!({
+                            "spec": {
+                                "template": {
+                                    "metadata": {
+                                        "annotations": {
+                                            "kubectl.kubernetes.io/restartedAt": now
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await
+                            .map_err(|e| ExecError(format!("patch deployment: {e}")))?;
+                        Ok::<Option<String>, ExecError>(None)
+                    })
+                })
+            }
+            Capability::PodState { namespace, name } => {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let client = Client::try_default().await
+                            .map_err(|e| ExecError(format!("kube client: {e}")))?;
+                        let api: Api<Pod> = Api::namespaced(client, namespace);
+                        match api.get(name).await {
+                            Ok(pod) => {
+                                let phase = pod.status.and_then(|s| s.phase).unwrap_or_else(|| "Unknown".to_string());
+                                Ok(Some(phase))
+                            }
+                            Err(kube::Error::Api(ref e)) if e.code == 404 => {
+                                Ok(Some("NotFound".to_string()))
+                            }
+                            Err(e) => Err(ExecError(format!("get pod: {e}"))),
+                        }
+                    })
+                })
             }
         }
     }

@@ -247,6 +247,9 @@ export interface components {
             /** Format: uuid */
             agent_id: string;
             host: string;
+            labels: {
+                [key: string]: string;
+            };
             /** @description Worst severity among the agent's recent events (last 24h), if any. */
             severity?: string | null;
             status: string;

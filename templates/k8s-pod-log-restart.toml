@@ -1,0 +1,30 @@
+# P1 Kubernetes remediation template: restart a pod when it logs a fatal error.
+# Safe tier — idempotent, no data loss.
+id = "k8s-pod-log-restart"
+version = 1
+title = "Restart pod logging fatal error"
+risk_tier = "safe"
+
+[match]
+source = "kube_workload"
+conditions = { "payload.reason" = "LogError", "payload.object_kind" = "Pod" }
+
+[parameters]
+namespace = { type = "string", from = "payload.namespace" }
+name = { type = "string", from = "payload.name" }
+
+[[preconditions]]
+equals = "Running"
+check = { capability = "pod_state", namespace = "{{namespace}}", name = "{{name}}" }
+
+[[steps]]
+capability = "delete_pod"
+namespace = "{{namespace}}"
+name = "{{name}}"
+
+[verify]
+equals = "NotFound"
+timeout_s = 30
+check = { capability = "pod_state", namespace = "{{namespace}}", name = "{{name}}" }
+
+rollback = "none"

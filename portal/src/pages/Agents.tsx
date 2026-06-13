@@ -65,7 +65,10 @@ export function Agents() {
                 active.has(k) ? "border-accent" : "border-line hover:border-fg-mute"
               }`}
             >
-              <span className="h-2.5 w-2.5 rounded-full" style={{ background: m.dot }} />
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                {k === "online" && <span className="animate-radar" />}
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ background: m.dot }} />
+              </span>
               <div>
                 <p className={`font-display text-2xl font-bold tabular-nums ${m.text}`}>{counts[k]}</p>
                 <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-fg-mute">{m.label}</p>
@@ -111,12 +114,33 @@ export function Agents() {
               onClick={() => setSelected(a)}
               className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left shadow-card transition-colors hover:border-accent"
             >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2 font-semibold">
-                  <span className="h-2 w-2 rounded-full" style={{ background: m.dot }} />
-                  {a.host}
+              <div className="flex items-center justify-between gap-2 w-full">
+                <span className="flex items-center gap-2 font-semibold min-w-0">
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    {a.status === "online" && <span className="animate-radar" />}
+                    <span className="relative inline-flex rounded-full h-2 w-2" style={{ background: m.dot }} />
+                  </span>
+                  <span className="truncate">{a.host}</span>
                 </span>
-                <span className={`font-mono text-[10px] uppercase tracking-wider ${m.text}`}>{m.label}</span>
+                {a.status === "online" ? (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <svg
+                      className="h-4 w-12 text-sev-notice"
+                      viewBox="0 0 50 20"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path className="animate-ekg-bg" opacity="0.15" d="M 0 10 H 12 L 15 3 L 18 17 L 21 0 L 24 20 L 27 10 H 30 L 33 6 L 36 10 H 50" />
+                      <path className="animate-ekg-pulse" d="M 0 10 H 12 L 15 3 L 18 17 L 21 0 L 24 20 L 27 10 H 30 L 33 6 L 36 10 H 50" />
+                    </svg>
+                    <span className={`font-mono text-[10px] uppercase tracking-wider ${m.text}`}>{m.label}</span>
+                  </div>
+                ) : (
+                  <span className={`font-mono text-[10px] uppercase tracking-wider ${m.text}`}>{m.label}</span>
+                )}
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {labels.length > 0 ? (

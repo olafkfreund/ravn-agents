@@ -49,14 +49,34 @@ pub fn is_valid_unit(unit: &str) -> bool {
         && unit.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':' | '\\'))
 }
 
-/// The unit a capability targets, if any. `nix_rollback` targets no unit.
+/// The unit a capability targets, if any. K8s and `nix_rollback` target no unit.
 fn capability_unit(cap: &Capability) -> Option<&str> {
     match cap {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
         | Capability::UnitState { unit } => Some(unit),
-        Capability::NixRollback => None,
+        // K8s capabilities and NixRollback carry no systemd unit.
+        Capability::NixRollback
+        | Capability::DeletePod { .. }
+        | Capability::RestartDeployment { .. }
+        | Capability::PodState { .. } => None,
     }
+}
+
+/// Whether any step or check in the envelope is a K8s capability. The host
+/// actuator cannot execute these — they belong to the in-cluster executor (#146).
+fn envelope_contains_kube_capability(env: &CommandEnvelope) -> bool {
+    let is_kube = |c: &Capability| {
+        matches!(
+            c,
+            Capability::DeletePod { .. }
+                | Capability::RestartDeployment { .. }
+                | Capability::PodState { .. }
+        )
+    };
+    env.preconditions.iter().any(|c| is_kube(&c.check))
+        || env.steps.iter().any(is_kube)
+        || env.verify.as_ref().map_or(false, |v| is_kube(&v.check))
 }
 
 /// Handle one command end-to-end: verify the envelope, validate inputs, check the
@@ -83,6 +103,16 @@ pub fn handle_command(
     // 1. Independent signature + expiry verification.
     if let Err(e) = verify_envelope(key, env, Utc::now()) {
         return reject(e.to_string());
+    }
+
+    // 1b. The host actuator cannot execute Kubernetes capabilities — those belong
+    //     to the in-cluster executor (#146). Reject early rather than silently
+    //     skip so the caller knows which executor to route to.
+    if envelope_contains_kube_capability(env) {
+        return reject(
+            "command contains Kubernetes capabilities; route to the in-cluster K8s executor (#146)"
+                .into(),
+        );
     }
 
     // 2. Validate every targeted unit before doing anything (preconditions,
@@ -223,6 +253,17 @@ impl CapabilityExecutor for SystemctlExecutor {
                 .arg("switch"))?;
                 Ok(None)
             }
+            // K8s capabilities (#146) — not executable from the host actuator.
+            // The envelope-level guard in `handle_command` rejects these before
+            // reaching the executor, so this branch is unreachable in practice;
+            // it is present only to keep the match exhaustive.
+            Capability::DeletePod { .. }
+            | Capability::RestartDeployment { .. }
+            | Capability::PodState { .. } => Err(ExecError(
+                "Kubernetes capabilities cannot be executed by the host actuator; \
+                 use the in-cluster K8s executor (#146)"
+                    .into(),
+            )),
         }
     }
 }
@@ -572,5 +613,107 @@ mod tests {
         assert_eq!(result.status, ActionStatus::Failed);
         let ran = exec.ran.lock().unwrap();
         assert!(!ran.iter().any(|c| matches!(c, Capability::NixRollback)));
+    }
+
+    // ── K8s capability rejection tests (#146) ────────────────────────────────
+
+    /// The host actuator must reject a signed envelope that contains a K8s
+    /// capability (DeletePod). The signature is valid — the executor routing
+    /// check fires *after* signature verification.
+    #[test]
+    fn kube_envelope_is_rejected_by_host_actuator() {
+        use ravn_core::{Condition, Verify};
+        let key = generate_signing_key();
+        let now = Utc::now();
+        let mut env = CommandEnvelope {
+            command_id: Uuid::now_v7(),
+            agent_id: AgentId(Uuid::now_v7()),
+            template_id: "k8s-pod-restart".into(),
+            template_version: 1,
+            risk_tier: RiskTier::Safe,
+            preconditions: vec![Condition {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "CrashLoopBackOff".into(),
+            }],
+            steps: vec![Capability::DeletePod {
+                namespace: "ravn-test".into(),
+                pod: "crasher-abc12".into(),
+            }],
+            verify: Some(Verify {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "Running".into(),
+                timeout_s: 60,
+            }),
+            rollback: ravn_core::Rollback::None,
+            approval_ref: ApprovalRef::PolicyAuto,
+            nonce: "kube-n1".into(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            sig: None,
+        };
+        sign_envelope(&key, &mut env);
+
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+
+        // Must be Rejected (not PreconditionFailed or Failed) because the
+        // host actuator cannot run K8s capabilities.
+        assert_eq!(result.status, ActionStatus::Rejected);
+        assert!(
+            result
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("K8s executor"),
+            "rejection detail should mention K8s executor: {:?}",
+            result.detail
+        );
+        // Nothing should have executed.
+        assert!(exec.ran.lock().unwrap().is_empty());
+    }
+
+    /// A K8s capability in the preconditions alone (not in steps) must also
+    /// cause the host actuator to reject the envelope.
+    #[test]
+    fn kube_capability_in_precondition_is_also_rejected() {
+        let key = generate_signing_key();
+        let now = Utc::now();
+        let mut env = CommandEnvelope {
+            command_id: Uuid::now_v7(),
+            agent_id: AgentId(Uuid::now_v7()),
+            template_id: "mixed".into(),
+            template_version: 1,
+            risk_tier: RiskTier::Safe,
+            preconditions: vec![ravn_core::Condition {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "CrashLoopBackOff".into(),
+            }],
+            steps: vec![
+                // Steps are host capabilities — only the precondition is K8s.
+                Capability::RestartUnit { unit: "nginx.service".into() },
+            ],
+            verify: None,
+            rollback: ravn_core::Rollback::None,
+            approval_ref: ApprovalRef::PolicyAuto,
+            nonce: "kube-n2".into(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            sig: None,
+        };
+        sign_envelope(&key, &mut env);
+
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &key.verifying_key(), &env);
+        assert_eq!(result.status, ActionStatus::Rejected);
+        assert!(exec.ran.lock().unwrap().is_empty());
     }
 }

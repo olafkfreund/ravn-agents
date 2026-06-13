@@ -40,9 +40,14 @@ pub enum RiskTier {
 ///
 /// On the wire this is internally tagged by `capability`, e.g.
 /// `{ "capability": "restart_unit", "unit": "nginx.service" }`.
+///
+/// Variants prefixed with `Kube*` or `DeletePod` / `RestartDeployment` /
+/// `PodState` are executed by the **in-cluster K8s executor** (#146) rather
+/// than the host actuator; the host actuator rejects them as unsupported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "capability", rename_all = "snake_case")]
 pub enum Capability {
+    // ── Host (systemd) capabilities ─────────────────────────────────────────
     /// Clear a unit's failed state.
     ResetFailed { unit: String },
     /// Restart a systemd unit.
@@ -52,13 +57,41 @@ pub enum Capability {
     /// Roll the host back to its previous NixOS generation — the universal net
     /// used by [`Rollback::NixGeneration`]. Targets no unit.
     NixRollback,
+
+    // ── In-cluster Kubernetes capabilities (#146) ────────────────────────────
+    /// Delete (and thus restart) a named pod. The pod must be owned by a
+    /// controller (Deployment / ReplicaSet / StatefulSet) so it is recreated.
+    DeletePod {
+        /// Kubernetes namespace of the pod.
+        namespace: String,
+        /// Pod name. May be a `{{param}}` placeholder.
+        pod: String,
+    },
+    /// Trigger a rollout restart of a Deployment (equivalent to
+    /// `kubectl rollout restart deployment/<name>`). Annotates
+    /// `spec.template.metadata.annotations."kubectl.kubernetes.io/restartedAt"`.
+    RestartDeployment {
+        /// Kubernetes namespace of the Deployment.
+        namespace: String,
+        /// Deployment name. May be a `{{param}}` placeholder.
+        deployment: String,
+    },
+    /// Read-only: return the phase of the **first** non-Running pod whose name
+    /// starts with `pod_prefix` (or an exact pod name) in `namespace`. Returns
+    /// `"Running"` when all matched pods are Running. Used in verify checks.
+    PodState {
+        /// Kubernetes namespace to query.
+        namespace: String,
+        /// Pod name or name-prefix to match. May be a `{{param}}` placeholder.
+        pod_prefix: String,
+    },
 }
 
 impl Capability {
     /// Whether this capability only observes (never mutates) host state. Used to
     /// constrain which capabilities may appear in pre/post-condition checks.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Capability::UnitState { .. })
+        matches!(self, Capability::UnitState { .. } | Capability::PodState { .. })
     }
 
     /// Resolve `{{param}}` placeholders in this capability's string fields against
@@ -76,6 +109,20 @@ impl Capability {
             }
             // No string fields to resolve.
             Capability::NixRollback => Capability::NixRollback,
+            Capability::DeletePod { namespace, pod } => Capability::DeletePod {
+                namespace: resolve_str(namespace, values)?,
+                pod: resolve_str(pod, values)?,
+            },
+            Capability::RestartDeployment { namespace, deployment } => {
+                Capability::RestartDeployment {
+                    namespace: resolve_str(namespace, values)?,
+                    deployment: resolve_str(deployment, values)?,
+                }
+            }
+            Capability::PodState { namespace, pod_prefix } => Capability::PodState {
+                namespace: resolve_str(namespace, values)?,
+                pod_prefix: resolve_str(pod_prefix, values)?,
+            },
         })
     }
 }
@@ -274,14 +321,29 @@ pub fn resolve_str(raw: &str, values: &BTreeMap<String, String>) -> Result<Strin
 
 /// Collect the placeholder names referenced by a capability's string fields.
 fn placeholders_in_capability(cap: &Capability) -> Vec<String> {
-    let field = match cap {
+    match cap {
         Capability::ResetFailed { unit }
         | Capability::RestartUnit { unit }
-        | Capability::UnitState { unit } => unit,
+        | Capability::UnitState { unit } => placeholders_in_str(unit),
         // No string fields, so no placeholders.
-        Capability::NixRollback => return Vec::new(),
-    };
-    placeholders_in_str(field)
+        Capability::NixRollback => Vec::new(),
+        // K8s capabilities — collect from all string fields.
+        Capability::DeletePod { namespace, pod } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(pod));
+            v
+        }
+        Capability::RestartDeployment { namespace, deployment } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(deployment));
+            v
+        }
+        Capability::PodState { namespace, pod_prefix } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(pod_prefix));
+            v
+        }
+    }
 }
 
 fn placeholders_in_str(raw: &str) -> Vec<String> {
@@ -698,5 +760,141 @@ mod tests {
         let _ = schemars::schema_for!(Template);
         let _ = schemars::schema_for!(CommandEnvelope);
         let _ = schemars::schema_for!(RemediationRecord);
+    }
+
+    // ── K8s capability tests (#146) ──────────────────────────────────────────
+
+    #[test]
+    fn kube_capabilities_are_internally_tagged() {
+        // delete_pod
+        let cap = Capability::DeletePod {
+            namespace: "ravn-test".into(),
+            pod: "crasher-abc12".into(),
+        };
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["capability"], "delete_pod");
+        assert_eq!(json["namespace"], "ravn-test");
+        assert_eq!(json["pod"], "crasher-abc12");
+        let back: Capability = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cap);
+
+        // restart_deployment
+        let cap2 = Capability::RestartDeployment {
+            namespace: "ravn-test".into(),
+            deployment: "api".into(),
+        };
+        let json2 = serde_json::to_value(&cap2).unwrap();
+        assert_eq!(json2["capability"], "restart_deployment");
+        let back2: Capability = serde_json::from_value(json2).unwrap();
+        assert_eq!(back2, cap2);
+
+        // pod_state
+        let cap3 =
+            Capability::PodState { namespace: "ravn-test".into(), pod_prefix: "crasher".into() };
+        let json3 = serde_json::to_value(&cap3).unwrap();
+        assert_eq!(json3["capability"], "pod_state");
+        let back3: Capability = serde_json::from_value(json3).unwrap();
+        assert_eq!(back3, cap3);
+    }
+
+    #[test]
+    fn kube_pod_state_is_read_only_others_are_not() {
+        assert!(Capability::PodState {
+            namespace: "ns".into(),
+            pod_prefix: "p".into()
+        }
+        .is_read_only());
+        assert!(!Capability::DeletePod { namespace: "ns".into(), pod: "p".into() }.is_read_only());
+        assert!(!Capability::RestartDeployment {
+            namespace: "ns".into(),
+            deployment: "d".into()
+        }
+        .is_read_only());
+    }
+
+    #[test]
+    fn kube_capabilities_resolve_placeholders() {
+        let mut params = BTreeMap::new();
+        params.insert("ns".to_string(), "ravn-test".to_string());
+        params.insert("pod".to_string(), "crasher-abc".to_string());
+
+        let cap = Capability::DeletePod {
+            namespace: "{{ns}}".into(),
+            pod: "{{pod}}".into(),
+        };
+        let resolved = cap.resolve(&params).unwrap();
+        assert_eq!(
+            resolved,
+            Capability::DeletePod { namespace: "ravn-test".into(), pod: "crasher-abc".into() }
+        );
+    }
+
+    #[test]
+    fn kube_pod_state_can_be_used_as_verify_check() {
+        // PodState is read-only, so it is valid in a Verify post-condition.
+        let template_src = r#"
+            id = "k8s-pod-restart"
+            version = 1
+            title = "Restart a CrashLooping pod"
+            risk_tier = "safe"
+            [match]
+            source = "kube_workload"
+            [parameters]
+            namespace = { type = "string", from = "payload.namespace" }
+            pod       = { type = "string", from = "payload.name" }
+            [[steps]]
+            capability = "delete_pod"
+            namespace  = "{{namespace}}"
+            pod        = "{{pod}}"
+            [verify]
+            equals    = "Running"
+            timeout_s = 60
+            check     = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+        "#;
+        let tpl: Template = toml::from_str(template_src).expect("parse");
+        tpl.validate().expect("template must be valid");
+        assert_eq!(tpl.id, "k8s-pod-restart");
+    }
+
+    #[test]
+    fn envelope_with_kube_steps_round_trips() {
+        let now = Utc::now();
+        let env = CommandEnvelope {
+            command_id: Uuid::now_v7(),
+            agent_id: AgentId(Uuid::now_v7()),
+            template_id: "k8s-pod-restart".into(),
+            template_version: 1,
+            risk_tier: RiskTier::Safe,
+            preconditions: vec![Condition {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "CrashLoopBackOff".into(),
+            }],
+            steps: vec![Capability::DeletePod {
+                namespace: "ravn-test".into(),
+                pod: "crasher-abc12".into(),
+            }],
+            verify: Some(Verify {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "Running".into(),
+                timeout_s: 60,
+            }),
+            rollback: Rollback::None,
+            approval_ref: ApprovalRef::PolicyAuto,
+            nonce: "kube-nonce-1".into(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            sig: None,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let back: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(env, back);
+        // Signing payload must be deterministic regardless of K8s fields.
+        assert_eq!(env.signing_payload(), back.signing_payload());
     }
 }

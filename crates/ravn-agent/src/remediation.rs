@@ -15,23 +15,53 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use std::sync::RwLock;
+
 use chrono::{DateTime, Utc};
 use ravn_core::{ActionResult, ActionStatus, CommandEnvelope};
-use ravn_crypto::{verify_envelope, verifying_key_from_b64, VerifyingKey};
+use ravn_crypto::{verify_envelope_with, verifying_key_from_b64, Keyring};
 use uuid::Uuid;
 
-/// Load the control-plane command-signing public key pinned at enrollment.
-/// Returns `None` when the agent hasn't enrolled (or predates remediation).
-pub fn load_pinned_key(cred_dir: &Path) -> Option<VerifyingKey> {
-    let path = cred_dir.join("command_pubkey.b64");
-    let b64 = std::fs::read_to_string(&path).ok()?;
+/// On-disk filename of the pinned command-signing keyring (#150).
+const KEYRING_FILE: &str = "command_keyring.json";
+/// On-disk filename of the single pinned active key (#114, pre-rotation).
+const PUBKEY_FILE: &str = "command_pubkey.b64";
+
+/// Load the control-plane command-signing **keyring** pinned at enrollment (#150).
+///
+/// Prefers the multi-key `command_keyring.json`; falls back to the legacy
+/// single-key `command_pubkey.b64` (an agent enrolled before rotation, or against
+/// a control plane that predates it). Returns `None` when neither is present (the
+/// agent hasn't enrolled / predates remediation).
+pub fn load_pinned_keyring(cred_dir: &Path) -> Option<Keyring> {
+    let ring_path = cred_dir.join(KEYRING_FILE);
+    if let Ok(json) = std::fs::read_to_string(&ring_path) {
+        match Keyring::from_json(&json) {
+            Ok(ring) if !ring.is_empty() => return Some(ring),
+            Ok(_) => tracing::warn!(path = %ring_path.display(), "pinned keyring is empty; ignoring"),
+            Err(e) => tracing::warn!(%e, path = %ring_path.display(), "pinned keyring is unreadable"),
+        }
+    }
+    // Legacy single pinned key.
+    let key_path = cred_dir.join(PUBKEY_FILE);
+    let b64 = std::fs::read_to_string(&key_path).ok()?;
     match verifying_key_from_b64(&b64) {
-        Ok(k) => Some(k),
+        Ok(k) => Some(Keyring::single(k)),
         Err(e) => {
-            tracing::warn!(%e, path = %path.display(), "pinned command key is unreadable");
+            tracing::warn!(%e, path = %key_path.display(), "pinned command key is unreadable");
             None
         }
     }
+}
+
+/// Persist the keyring atomically (write-temp-then-rename) so a crash mid-write
+/// never leaves a truncated trust set on disk.
+fn persist_keyring(cred_dir: &Path, json: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(cred_dir)?;
+    let final_path = cred_dir.join(KEYRING_FILE);
+    let tmp_path = cred_dir.join(format!("{KEYRING_FILE}.tmp"));
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, &final_path)
 }
 
 /// On-disk set of executed command ids — the idempotency ledger.
@@ -81,7 +111,7 @@ impl Ledger {
 /// ledger write failed so we conservatively skip), otherwise the result to POST.
 pub fn process_command<F>(
     env: &CommandEnvelope,
-    key: &VerifyingKey,
+    ring: &Keyring,
     ledger: &Ledger,
     now: DateTime<Utc>,
     send: F,
@@ -92,7 +122,7 @@ where
     if ledger.contains(env.command_id) {
         return None; // already handled — at-most-once
     }
-    if let Err(e) = verify_envelope(key, env, now) {
+    if let Err(e) = verify_envelope_with(ring, env, now) {
         tracing::warn!(command_id = %env.command_id, %e, "rejecting command: signature/expiry");
         return Some(result(env.command_id, ActionStatus::Rejected, e.to_string()));
     }
@@ -130,27 +160,87 @@ pub fn send_to_actuator(socket: &Path, env: &CommandEnvelope) -> anyhow::Result<
     Ok(serde_json::from_str(line.trim())?)
 }
 
-/// The pull loop: every `poll_secs`, fetch pending commands and process them.
+/// The pull loop: every `poll_secs`, refresh the trusted keyring (so rotation
+/// reaches the fleet on the next check-in, #150), then fetch pending commands and
+/// process them. The keyring lives behind an `RwLock` shared with the actuator
+/// path is not needed here — `ravnd` only verifies for its own dispatch decision;
+/// the actuator independently re-verifies.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: reqwest::Client,
     base_url: String,
     agent_id: Uuid,
     api_token: Option<String>,
-    key: VerifyingKey,
+    ring: Keyring,
+    cred_dir: PathBuf,
     ledger: std::sync::Arc<Ledger>,
     socket: PathBuf,
     poll_secs: u64,
 ) {
+    let ring = RwLock::new(ring);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(poll_secs.max(1)));
     loop {
         tick.tick().await;
+        // Refresh the keyring first: a rotation published since the last tick is
+        // pinned now, before any command signed by the new key arrives.
+        refresh_keyring(&http, &base_url, api_token.as_deref(), &ring, &cred_dir).await;
         if let Err(e) =
-            poll_once(&http, &base_url, agent_id, api_token.as_deref(), &key, &ledger, &socket).await
+            poll_once(&http, &base_url, agent_id, api_token.as_deref(), &ring, &ledger, &socket).await
         {
             tracing::debug!(%e, "command poll failed");
         }
     }
+}
+
+/// Fetch the current keyring from the authenticated `/command-keys` endpoint and,
+/// if it parses and is non-empty, pin it (atomically) and swap it in. A fetch or
+/// parse failure is non-fatal: the agent keeps its last-pinned keyring, so a
+/// transient control-plane blip never strands a host — it just rotates later.
+async fn refresh_keyring(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_token: Option<&str>,
+    ring: &RwLock<Keyring>,
+    cred_dir: &Path,
+) {
+    let base = base_url.trim_end_matches('/');
+    let mut req = http.get(format!("{base}/command-keys"));
+    if let Some(t) = api_token {
+        req = req.bearer_auth(t);
+    }
+    let json = match async { req.send().await?.error_for_status()?.text().await }.await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::debug!(%e, "keyring refresh fetch failed; keeping pinned keyring");
+            return;
+        }
+    };
+    let fetched = match Keyring::from_json(&json) {
+        Ok(r) if !r.is_empty() => r,
+        Ok(_) => {
+            tracing::warn!("control plane published an empty keyring; keeping pinned keyring");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%e, "control plane published an unparseable keyring; keeping pinned keyring");
+            return;
+        }
+    };
+
+    // Only persist/swap when the trust set actually changed (avoids churn).
+    let changed = {
+        let current = ring.read().expect("keyring lock poisoned");
+        current.kids() != fetched.kids() || current.default_kid() != fetched.default_kid()
+    };
+    if !changed {
+        return;
+    }
+    if let Err(e) = persist_keyring(cred_dir, &json) {
+        tracing::warn!(%e, "pinning refreshed keyring to disk failed; using it in-memory only");
+    }
+    let kids = fetched.kids();
+    *ring.write().expect("keyring lock poisoned") = fetched;
+    tracing::info!(?kids, "command-signing keyring rotated; new trust set pinned");
 }
 
 async fn poll_once(
@@ -158,7 +248,7 @@ async fn poll_once(
     base_url: &str,
     agent_id: Uuid,
     api_token: Option<&str>,
-    key: &VerifyingKey,
+    ring: &RwLock<Keyring>,
     ledger: &Ledger,
     socket: &Path,
 ) -> anyhow::Result<()> {
@@ -170,9 +260,11 @@ async fn poll_once(
     let envelopes: Vec<CommandEnvelope> = req.send().await?.error_for_status()?.json().await?;
 
     for env in &envelopes {
-        let Some(result) =
-            process_command(env, key, ledger, Utc::now(), |e| send_to_actuator(socket, e))
-        else {
+        let result = {
+            let ring = ring.read().expect("keyring lock poisoned");
+            process_command(env, &ring, ledger, Utc::now(), |e| send_to_actuator(socket, e))
+        };
+        let Some(result) = result else {
             continue;
         };
         let mut post = http
@@ -194,6 +286,11 @@ mod tests {
     use ravn_core::{AgentId, ApprovalRef, Capability, RiskTier};
     use ravn_crypto::{generate_signing_key, sign_envelope, SigningKey};
 
+    /// A single-key keyring trusting `key`'s public half.
+    fn ring_of(key: &SigningKey) -> Keyring {
+        Keyring::single(key.verifying_key())
+    }
+
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ravn-{name}-{}-{}", std::process::id(), Uuid::now_v7()))
     }
@@ -214,6 +311,7 @@ mod tests {
             nonce: "n".into(),
             issued_at: now,
             expires_at: now + chrono::Duration::minutes(5),
+            kid: None,
             sig: None,
         };
         sign_envelope(key, &mut env);
@@ -251,12 +349,12 @@ mod tests {
             *calls.lock().unwrap() += 1;
             ok_result(e)
         };
-        let r = process_command(&env, &key.verifying_key(), &ledger, Utc::now(), send);
+        let r = process_command(&env, &ring_of(&key), &ledger, Utc::now(), send);
         assert_eq!(r.unwrap().status, ActionStatus::Succeeded);
         assert_eq!(*calls.lock().unwrap(), 1);
 
         // Re-processing the same command does nothing (at-most-once).
-        let r2 = process_command(&env, &key.verifying_key(), &ledger, Utc::now(), |e| {
+        let r2 = process_command(&env, &ring_of(&key), &ledger, Utc::now(), |e| {
             *calls.lock().unwrap() += 1;
             ok_result(e)
         });
@@ -272,7 +370,7 @@ mod tests {
         let ledger = Ledger::load(temp_path("ledger"));
 
         let mut ran = false;
-        let r = process_command(&env, &key.verifying_key(), &ledger, Utc::now(), |e| {
+        let r = process_command(&env, &ring_of(&key), &ledger, Utc::now(), |e| {
             ran = true;
             ok_result(e)
         });
@@ -286,7 +384,7 @@ mod tests {
         let key = generate_signing_key();
         let env = signed(&key);
         let ledger = Ledger::load(temp_path("ledger"));
-        let r = process_command(&env, &key.verifying_key(), &ledger, Utc::now(), |_| {
+        let r = process_command(&env, &ring_of(&key), &ledger, Utc::now(), |_| {
             Err(anyhow::anyhow!("connection refused"))
         });
         assert_eq!(r.unwrap().status, ActionStatus::Failed);
@@ -325,5 +423,78 @@ mod tests {
         assert_eq!(res.command_id, expected_id);
         assert_eq!(res.status, ActionStatus::Succeeded);
         let _ = std::fs::remove_file(&sock);
+    }
+
+    // #150: during a rotation overlap the agent's keyring trusts BOTH the old and
+    // the new key, so commands signed by either execute — zero failures.
+    #[test]
+    fn both_keys_execute_during_overlap_window() {
+        let old = generate_signing_key();
+        let new = generate_signing_key();
+        let mut ring = Keyring::single(old.verifying_key());
+        ring.insert(new.verifying_key());
+
+        for signing in [&old, &new] {
+            let env = signed(signing);
+            let ledger = Ledger::load(temp_path("ledger"));
+            let mut ran = false;
+            let r = process_command(&env, &ring, &ledger, Utc::now(), |e| {
+                ran = true;
+                ok_result(e)
+            });
+            assert_eq!(r.unwrap().status, ActionStatus::Succeeded);
+            assert!(ran, "a command signed by a trusted key must execute");
+        }
+    }
+
+    // After the overlap window the old key is retired; a command it signed is
+    // rejected and never reaches the actuator.
+    #[test]
+    fn retired_key_command_is_rejected() {
+        let old = generate_signing_key();
+        let new = generate_signing_key();
+        let env = signed(&old);
+        let ring = Keyring::single(new.verifying_key()); // old retired
+
+        let ledger = Ledger::load(temp_path("ledger"));
+        let mut ran = false;
+        let r = process_command(&env, &ring, &ledger, Utc::now(), |e| {
+            ran = true;
+            ok_result(e)
+        });
+        assert_eq!(r.unwrap().status, ActionStatus::Rejected);
+        assert!(!ran, "a retired-key command must never reach the actuator");
+        assert!(!ledger.contains(env.command_id));
+    }
+
+    // The pin loads the multi-key keyring when present, and falls back to the
+    // legacy single pubkey file otherwise.
+    #[test]
+    fn load_pinned_keyring_prefers_keyring_then_falls_back() {
+        let dir = temp_path("creds");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = generate_signing_key();
+
+        // No files yet → None.
+        assert!(load_pinned_keyring(&dir).is_none());
+
+        // Legacy single-key pin only.
+        std::fs::write(
+            dir.join(PUBKEY_FILE),
+            ravn_crypto::verifying_key_to_b64(&key.verifying_key()),
+        )
+        .unwrap();
+        let ring = load_pinned_keyring(&dir).unwrap();
+        assert_eq!(ring.len(), 1);
+
+        // Add a two-key keyring → preferred over the legacy file.
+        let other = generate_signing_key();
+        let mut multi = Keyring::single(key.verifying_key());
+        multi.insert(other.verifying_key());
+        persist_keyring(&dir, &multi.to_json()).unwrap();
+        let ring = load_pinned_keyring(&dir).unwrap();
+        assert_eq!(ring.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

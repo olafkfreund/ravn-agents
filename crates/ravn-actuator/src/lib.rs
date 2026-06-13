@@ -14,9 +14,11 @@
 
 use std::path::Path;
 
+use std::sync::RwLock;
+
 use chrono::Utc;
 use ravn_core::{ActionResult, ActionStatus, Capability, CommandEnvelope, Rollback};
-use ravn_crypto::{verify_envelope, VerifyingKey};
+use ravn_crypto::{verify_envelope_with, Keyring};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -65,7 +67,7 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
 /// injected [`CapabilityExecutor`], so it is fully unit-testable.
 pub fn handle_command(
     executor: &dyn CapabilityExecutor,
-    key: &VerifyingKey,
+    ring: &Keyring,
     env: &CommandEnvelope,
 ) -> ActionResult {
     let reject = |detail: String| ActionResult {
@@ -80,8 +82,10 @@ pub fn handle_command(
     };
     let fail = |detail: String, observed: Option<String>| result(ActionStatus::Failed, Some(detail), observed);
 
-    // 1. Independent signature + expiry verification.
-    if let Err(e) = verify_envelope(key, env, Utc::now()) {
+    // 1. Independent signature + expiry verification against the trusted keyring
+    //    (#150): even a compromised, unprivileged `ravnd` cannot fabricate a call,
+    //    and the actuator honours the same rotation overlap the agent does.
+    if let Err(e) = verify_envelope_with(ring, env, Utc::now()) {
         return reject(e.to_string());
     }
 
@@ -250,9 +254,15 @@ fn peer_uid(stream: &UnixStream) -> anyhow::Result<u32> {
 /// Serve the actuator socket: accept connections, enforce the peer uid, and
 /// handle one newline-delimited JSON [`CommandEnvelope`] → [`ActionResult`] per
 /// connection. When `allowed_uid` is `Some`, only that uid may connect.
+///
+/// `ring` is the trusted command-signing keyring (#150). When `keyring_path` is
+/// `Some`, the actuator reloads that file before each connection, so a key
+/// rotation the agent re-pins reaches the actuator too — independently verified
+/// here, never trusting `ravnd` to vouch for the key.
 pub async fn serve(
     socket_path: &Path,
-    key: VerifyingKey,
+    ring: Keyring,
+    keyring_path: Option<&Path>,
     executor: impl CapabilityExecutor + 'static,
     allowed_uid: Option<u32>,
 ) -> anyhow::Result<()> {
@@ -266,6 +276,7 @@ pub async fn serve(
     }
     tracing::info!(path = %socket_path.display(), "actuator listening");
 
+    let ring = RwLock::new(ring);
     loop {
         let (stream, _addr) = listener.accept().await?;
         match peer_uid(&stream) {
@@ -279,15 +290,47 @@ pub async fn serve(
                 continue;
             }
         }
-        if let Err(e) = handle_connection(stream, &key, &executor).await {
+        // Pick up a rotated keyring the agent re-pinned since the last command.
+        if let Some(path) = keyring_path {
+            reload_keyring(path, &ring);
+        }
+        // Snapshot the keyring (cheap clone) so the lock is not held across the
+        // connection's async IO.
+        let snapshot = ring.read().expect("keyring lock poisoned").clone();
+        if let Err(e) = handle_connection(stream, &snapshot, &executor).await {
             tracing::warn!(%e, "actuator connection error");
         }
     }
 }
 
+/// Reload the trusted keyring from disk, swapping it in only on a clean parse of
+/// a non-empty ring. A missing/garbled file is non-fatal: the actuator keeps the
+/// last good keyring (fail safe, never fail open).
+fn reload_keyring(path: &Path, ring: &RwLock<Keyring>) {
+    let json = match std::fs::read_to_string(path) {
+        Ok(j) => j,
+        Err(_) => return, // not yet written / transient — keep current
+    };
+    match Keyring::from_json(&json) {
+        Ok(fresh) if !fresh.is_empty() => {
+            let changed = {
+                let cur = ring.read().expect("keyring lock poisoned");
+                cur.kids() != fresh.kids() || cur.default_kid() != fresh.default_kid()
+            };
+            if changed {
+                let kids = fresh.kids();
+                *ring.write().expect("keyring lock poisoned") = fresh;
+                tracing::info!(?kids, "actuator reloaded rotated command keyring");
+            }
+        }
+        Ok(_) => tracing::warn!(path = %path.display(), "keyring file is empty; keeping current"),
+        Err(e) => tracing::warn!(%e, path = %path.display(), "keyring file unparseable; keeping current"),
+    }
+}
+
 async fn handle_connection(
     stream: UnixStream,
-    key: &VerifyingKey,
+    ring: &Keyring,
     executor: &dyn CapabilityExecutor,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
@@ -296,7 +339,7 @@ async fn handle_connection(
         return Ok(());
     }
     let env: CommandEnvelope = serde_json::from_str(line.trim())?;
-    let result = handle_command(executor, key, &env);
+    let result = handle_command(executor, ring, &env);
     let mut out = serde_json::to_vec(&result)?;
     out.push(b'\n');
     reader.into_inner().write_all(&out).await?;
@@ -311,6 +354,11 @@ mod tests {
     use ravn_core::{AgentId, ApprovalRef, Condition, RiskTier, Rollback, Verify};
     use ravn_crypto::{generate_signing_key, sign_envelope, SigningKey};
     use uuid::Uuid;
+
+    /// A single-key keyring trusting `key`'s public half.
+    fn ring_of(key: &SigningKey) -> Keyring {
+        Keyring::single(key.verifying_key())
+    }
 
     /// Records the capabilities run, and returns scripted outputs for checks.
     struct MockExecutor {
@@ -396,6 +444,7 @@ mod tests {
             nonce: "n1".into(),
             issued_at: now,
             expires_at: now + chrono::Duration::minutes(5),
+            kid: None,
             sig: None,
         };
         sign_envelope(key, &mut env);
@@ -407,7 +456,7 @@ mod tests {
         let key = generate_signing_key();
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Succeeded);
         assert_eq!(result.observed_state.as_deref(), Some("active"));
         let ran = exec.ran.lock().unwrap();
@@ -419,7 +468,7 @@ mod tests {
         let key = generate_signing_key();
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("failed"); // unit did not come back
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Failed);
         assert_eq!(result.observed_state.as_deref(), Some("failed"));
     }
@@ -430,7 +479,7 @@ mod tests {
         let env = signed_restart_envelope(&key, Some("active"));
         let mut exec = MockExecutor::new("active");
         exec.fail_on_restart = true;
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Failed);
         // unit_state check must NOT have run after the failed restart.
         let ran = exec.ran.lock().unwrap();
@@ -443,9 +492,41 @@ mod tests {
         let attacker = generate_signing_key();
         let env = signed_restart_envelope(&attacker, Some("active")); // signed by the wrong key
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Rejected);
         assert!(exec.ran.lock().unwrap().is_empty(), "nothing runs on a bad signature");
+    }
+
+    // #150: during a rotation overlap the actuator's keyring trusts both keys, so
+    // commands signed by either the old or the new key execute.
+    #[test]
+    fn actuator_accepts_both_keys_during_overlap() {
+        let old = generate_signing_key();
+        let new = generate_signing_key();
+        let mut ring = Keyring::single(old.verifying_key());
+        ring.insert(new.verifying_key());
+
+        for signing in [&old, &new] {
+            let env = signed_restart_envelope(signing, Some("active"));
+            let exec = MockExecutor::new("active");
+            let result = handle_command(&exec, &ring, &env);
+            assert_eq!(result.status, ActionStatus::Succeeded);
+        }
+    }
+
+    // After retirement the old key is dropped from the actuator's ring; a command
+    // it signed is rejected and never runs.
+    #[test]
+    fn actuator_rejects_retired_key() {
+        let old = generate_signing_key();
+        let new = generate_signing_key();
+        let env = signed_restart_envelope(&old, Some("active"));
+        let ring = Keyring::single(new.verifying_key()); // old retired
+
+        let exec = MockExecutor::new("active");
+        let result = handle_command(&exec, &ring, &env);
+        assert_eq!(result.status, ActionStatus::Rejected);
+        assert!(exec.ran.lock().unwrap().is_empty(), "a retired-key command must not run");
     }
 
     #[test]
@@ -466,11 +547,12 @@ mod tests {
             nonce: "n".into(),
             issued_at: now,
             expires_at: now + chrono::Duration::minutes(5),
+            kid: None,
             sig: None,
         };
         sign_envelope(&key, &mut env);
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Rejected);
         assert!(exec.ran.lock().unwrap().is_empty());
     }
@@ -494,7 +576,7 @@ mod tests {
             EnvelopeOpts { precondition_equals: Some("failed"), ..Default::default() },
         );
         let exec = MockExecutor::new("active");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::PreconditionFailed);
         assert_eq!(result.observed_state.as_deref(), Some("active"));
         let ran = exec.ran.lock().unwrap();
@@ -518,7 +600,7 @@ mod tests {
         // Precondition sees "failed" (holds). After restart, verify also reads the
         // mock's fixed state "failed", so verify fails — but the precondition phase
         // itself must have let the steps run.
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         let ran = exec.ran.lock().unwrap();
         assert!(ran.iter().any(|c| matches!(c, Capability::RestartUnit { .. })));
         assert_ne!(result.status, ActionStatus::PreconditionFailed);
@@ -536,7 +618,7 @@ mod tests {
             },
         );
         let exec = MockExecutor::new("failed"); // unit never recovers → verify fails
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         // Rollback ran and succeeded, so the outcome is Failed (not Frozen).
         assert_eq!(result.status, ActionStatus::Failed);
         let ran = exec.ran.lock().unwrap();
@@ -557,7 +639,7 @@ mod tests {
         );
         let mut exec = MockExecutor::new("failed"); // verify fails
         exec.fail_on_rollback = true; // and the rollback itself fails
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Frozen);
         assert!(result.detail.as_deref().unwrap().contains("frozen"));
     }
@@ -568,7 +650,7 @@ mod tests {
         // Default rollback is None.
         let env = signed_restart_envelope(&key, Some("active"));
         let exec = MockExecutor::new("failed");
-        let result = handle_command(&exec, &key.verifying_key(), &env);
+        let result = handle_command(&exec, &ring_of(&key), &env);
         assert_eq!(result.status, ActionStatus::Failed);
         let ran = exec.ran.lock().unwrap();
         assert!(!ran.iter().any(|c| matches!(c, Capability::NixRollback)));

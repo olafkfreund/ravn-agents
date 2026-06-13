@@ -39,6 +39,12 @@ pub struct Config {
     /// `RAVN_COMMAND_KEY`. Generated and persisted (`0600`) if absent; when
     /// unset entirely, an ephemeral key is used (dev only).
     pub command_key_path: Option<String>,
+    /// Directory of *previous* command-signing public keys still trusted during
+    /// a rotation overlap window (#150). `RAVN_COMMAND_PREVIOUS_KEYS_DIR`. Each
+    /// file is one base64 Ed25519 public key. Empty/absent → no overlap (only the
+    /// active key is trusted). Drop the old pubkey here when rotating, remove it
+    /// after the window.
+    pub command_previous_keys_dir: Option<String>,
     /// Directory of curated remediation templates (#115). `RAVN_TEMPLATES_DIR`,
     /// default `templates`. Missing dir → no proposals.
     pub templates_dir: String,
@@ -191,6 +197,7 @@ impl Config {
         let inference = Self::inference_from_env(&token)?;
         let oidc = Self::oidc_from_env(&token)?;
         let command_key_path = token("RAVN_COMMAND_KEY");
+        let command_previous_keys_dir = token("RAVN_COMMAND_PREVIOUS_KEYS_DIR");
         let templates_dir = token("RAVN_TEMPLATES_DIR").unwrap_or_else(|| "templates".to_string());
         let command_ttl_secs = std::env::var("RAVN_COMMAND_TTL_SECS")
             .ok()
@@ -231,6 +238,7 @@ impl Config {
             inference,
             oidc,
             command_key_path,
+            command_previous_keys_dir,
             templates_dir,
             command_ttl_secs,
             kb_dir,

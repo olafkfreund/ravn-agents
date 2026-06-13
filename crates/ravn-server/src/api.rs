@@ -309,9 +309,28 @@ async fn enroll(
         certificate_pem,
         ca_certificate_pem: ca.ca_cert_pem().to_string(),
         command_signing_pubkey: state.command_signer.pubkey_b64().to_string(),
+        command_keyring: state.command_signer.keyring_json().to_string(),
         not_after,
     })
     .into_response()
+}
+
+/// Publish the current command-signing keyring (#150): the active key plus any
+/// previous keys still inside a rotation overlap window. Agents fetch this on
+/// each check-in and re-pin it, so a key rotates with zero verification failures
+/// and no re-enrollment.
+///
+/// Auth: behind the API's bearer middleware, the same authenticated channel the
+/// command pull uses. The document contains only *public* keys — no secret is
+/// exposed — but serving it under auth keeps an unauthenticated party from
+/// learning the fleet's trust set. The response is signed-key material the agent
+/// only ever uses to *verify*, never to sign.
+async fn get_command_keys(State(state): State<AppState>) -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.command_signer.keyring_json().to_string(),
+    )
+        .into_response()
 }
 
 /// Pull pending remediation commands for an agent (#114). The agent long-polls
@@ -624,6 +643,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ingest", axum::routing::post(ingest))
         .route("/agents/{id}/commands", get(get_commands))
         .route("/agents/{id}/commands/{cmd}/result", axum::routing::post(post_command_result))
+        .route("/command-keys", get(get_command_keys))
         .route("/api/remediations", get(list_remediations))
         .route("/api/remediations/{id}/approve", axum::routing::post(approve_remediation))
         .route("/api/remediations/{id}/reject", axum::routing::post(reject_remediation))

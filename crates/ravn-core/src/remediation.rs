@@ -35,79 +35,19 @@ pub enum RiskTier {
     Dangerous,
 }
 
-/// Validate a Kubernetes DNS label (RFC 1123 §2.1 as applied by K8s).
-///
-/// Rules:
-/// - 1–63 characters
-/// - Only lowercase alphanumeric characters or `-`
-/// - Must start and end with an alphanumeric character
-///
-/// Used for namespace names, pod names, deployment names, and all other
-/// Kubernetes object identifiers passed as template parameters.
-///
-/// # Examples
-///
-/// ```
-/// use ravn_core::is_valid_k8s_label;
-/// assert!(is_valid_k8s_label("my-app"));
-/// assert!(is_valid_k8s_label("payments"));
-/// assert!(!is_valid_k8s_label("MyApp"));        // uppercase not allowed
-/// assert!(!is_valid_k8s_label("-starts-dash"));  // must start alphanumeric
-/// assert!(!is_valid_k8s_label("ends-dash-"));    // must end alphanumeric
-/// assert!(!is_valid_k8s_label(""));              // empty not allowed
-/// ```
-pub fn is_valid_k8s_label(s: &str) -> bool {
-    if s.is_empty() || s.len() > 63 {
-        return false;
-    }
-    let mut chars = s.chars().peekable();
-    // Must start with lowercase alphanumeric.
-    if !chars.peek().is_some_and(|c| matches!(c, 'a'..='z' | '0'..='9')) {
-        return false;
-    }
-    let chars_vec: Vec<char> = s.chars().collect();
-    // Must end with lowercase alphanumeric.
-    if !matches!(chars_vec[chars_vec.len() - 1], 'a'..='z' | '0'..='9') {
-        return false;
-    }
-    // Interior characters: lowercase alphanumeric or `-`.
-    chars_vec.iter().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
-}
-
-/// Validate a Kubernetes DNS subdomain name (RFC 1123 §2.1 as applied by K8s).
-///
-/// A subdomain is a sequence of DNS labels joined by `.`, where each label
-/// obeys [`is_valid_k8s_label`] rules. The total length must not exceed 253
-/// characters.
-///
-/// K8s uses subdomain rules for resource names that can contain dots
-/// (e.g. config map keys, some annotation values). Pod and namespace names
-/// follow the stricter single-label rule; see [`is_valid_k8s_label`].
-///
-/// # Examples
-///
-/// ```
-/// use ravn_core::is_valid_k8s_subdomain;
-/// assert!(is_valid_k8s_subdomain("my-app"));
-/// assert!(is_valid_k8s_subdomain("api.payments.svc"));
-/// assert!(!is_valid_k8s_subdomain("My.App"));   // uppercase not allowed
-/// assert!(!is_valid_k8s_subdomain(""));          // empty not allowed
-/// ```
-pub fn is_valid_k8s_subdomain(s: &str) -> bool {
-    if s.is_empty() || s.len() > 253 {
-        return false;
-    }
-    s.split('.').all(is_valid_k8s_label)
-}
-
 /// A single typed, whitelisted operation. The actuator (#113) implements exactly
 /// these and nothing else — there is no arbitrary-shell variant by design.
 ///
 /// On the wire this is internally tagged by `capability`, e.g.
 /// `{ "capability": "restart_unit", "unit": "nginx.service" }`.
+///
+/// Variants prefixed with `Kube*` or `DeletePod` / `RestartDeployment` /
+/// `PodState` are executed by the **in-cluster K8s executor** (#146) rather
+/// than the host actuator; the host actuator rejects them as unsupported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "capability", rename_all = "snake_case")]
 pub enum Capability {
+    // ── Host (systemd) capabilities ─────────────────────────────────────────
     /// Clear a unit's failed state.
     ResetFailed { unit: String },
     /// Restart a systemd unit.
@@ -117,22 +57,41 @@ pub enum Capability {
     /// Roll the host back to its previous NixOS generation — the universal net
     /// used by [`Rollback::NixGeneration`]. Targets no unit.
     NixRollback,
-    /// Delete a Kubernetes pod so its owning controller recreates it. Targets a
-    /// namespaced pod by RFC 1123 label-validated `namespace` and `pod` names.
-    /// Mutating; no data loss for stateless workloads.
-    KubePodRestart { namespace: String, pod: String },
-    /// Roll out a new revision of a Kubernetes Deployment (patch
-    /// `spec.template.metadata.annotations` restart timestamp). Targets a
-    /// namespaced deployment by RFC 1123 label-validated `namespace` and
-    /// `deployment` names. Mutating; equivalent to `kubectl rollout restart`.
-    KubeRolloutRestart { namespace: String, deployment: String },
+
+    // ── In-cluster Kubernetes capabilities (#146) ────────────────────────────
+    /// Delete (and thus restart) a named pod. The pod must be owned by a
+    /// controller (Deployment / ReplicaSet / StatefulSet) so it is recreated.
+    DeletePod {
+        /// Kubernetes namespace of the pod.
+        namespace: String,
+        /// Pod name. May be a `{{param}}` placeholder.
+        pod: String,
+    },
+    /// Trigger a rollout restart of a Deployment (equivalent to
+    /// `kubectl rollout restart deployment/<name>`). Annotates
+    /// `spec.template.metadata.annotations."kubectl.kubernetes.io/restartedAt"`.
+    RestartDeployment {
+        /// Kubernetes namespace of the Deployment.
+        namespace: String,
+        /// Deployment name. May be a `{{param}}` placeholder.
+        deployment: String,
+    },
+    /// Read-only: return the phase of the **first** non-Running pod whose name
+    /// starts with `pod_prefix` (or an exact pod name) in `namespace`. Returns
+    /// `"Running"` when all matched pods are Running. Used in verify checks.
+    PodState {
+        /// Kubernetes namespace to query.
+        namespace: String,
+        /// Pod name or name-prefix to match. May be a `{{param}}` placeholder.
+        pod_prefix: String,
+    },
 }
 
 impl Capability {
     /// Whether this capability only observes (never mutates) host state. Used to
     /// constrain which capabilities may appear in pre/post-condition checks.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Capability::UnitState { .. })
+        matches!(self, Capability::UnitState { .. } | Capability::PodState { .. })
     }
 
     /// Resolve `{{param}}` placeholders in this capability's string fields against
@@ -150,7 +109,9 @@ impl Capability {
             }
             // No string fields to resolve.
             Capability::NixRollback => Capability::NixRollback,
-            Capability::KubePodRestart { namespace, pod } => {
+            // K8s identifiers are validated at resolve time (#145): a hostile or
+            // malformed template parameter is rejected before any envelope is built.
+            Capability::DeletePod { namespace, pod } => {
                 let ns = resolve_str(namespace, values)?;
                 let pd = resolve_str(pod, values)?;
                 if !is_valid_k8s_label(&ns) {
@@ -159,9 +120,9 @@ impl Capability {
                 if !is_valid_k8s_label(&pd) {
                     return Err(RenderError::InvalidKubeIdentifier("pod".into(), pd));
                 }
-                Capability::KubePodRestart { namespace: ns, pod: pd }
+                Capability::DeletePod { namespace: ns, pod: pd }
             }
-            Capability::KubeRolloutRestart { namespace, deployment } => {
+            Capability::RestartDeployment { namespace, deployment } => {
                 let ns = resolve_str(namespace, values)?;
                 let dep = resolve_str(deployment, values)?;
                 if !is_valid_k8s_label(&ns) {
@@ -170,7 +131,18 @@ impl Capability {
                 if !is_valid_k8s_label(&dep) {
                     return Err(RenderError::InvalidKubeIdentifier("deployment".into(), dep));
                 }
-                Capability::KubeRolloutRestart { namespace: ns, deployment: dep }
+                Capability::RestartDeployment { namespace: ns, deployment: dep }
+            }
+            Capability::PodState { namespace, pod_prefix } => {
+                let ns = resolve_str(namespace, values)?;
+                let pp = resolve_str(pod_prefix, values)?;
+                if !is_valid_k8s_label(&ns) {
+                    return Err(RenderError::InvalidKubeIdentifier("namespace".into(), ns));
+                }
+                if !is_valid_k8s_label(&pp) {
+                    return Err(RenderError::InvalidKubeIdentifier("pod_prefix".into(), pp));
+                }
+                Capability::PodState { namespace: ns, pod_prefix: pp }
             }
         })
     }
@@ -329,6 +301,71 @@ impl std::fmt::Display for TemplateError {
 
 impl std::error::Error for TemplateError {}
 
+/// Validate a Kubernetes DNS label (RFC 1123 §2.1 as applied by K8s).
+///
+/// Rules:
+/// - 1–63 characters
+/// - Only lowercase alphanumeric characters or `-`
+/// - Must start and end with an alphanumeric character
+///
+/// Used for namespace names, pod names, deployment names, and all other
+/// Kubernetes object identifiers passed as template parameters.
+///
+/// # Examples
+///
+/// ```
+/// use ravn_core::is_valid_k8s_label;
+/// assert!(is_valid_k8s_label("my-app"));
+/// assert!(is_valid_k8s_label("payments"));
+/// assert!(!is_valid_k8s_label("MyApp"));        // uppercase not allowed
+/// assert!(!is_valid_k8s_label("-starts-dash"));  // must start alphanumeric
+/// assert!(!is_valid_k8s_label("ends-dash-"));    // must end alphanumeric
+/// assert!(!is_valid_k8s_label(""));              // empty not allowed
+/// ```
+pub fn is_valid_k8s_label(s: &str) -> bool {
+    if s.is_empty() || s.len() > 63 {
+        return false;
+    }
+    let mut chars = s.chars().peekable();
+    // Must start with lowercase alphanumeric.
+    if !chars.peek().is_some_and(|c| matches!(c, 'a'..='z' | '0'..='9')) {
+        return false;
+    }
+    let chars_vec: Vec<char> = s.chars().collect();
+    // Must end with lowercase alphanumeric.
+    if !matches!(chars_vec[chars_vec.len() - 1], 'a'..='z' | '0'..='9') {
+        return false;
+    }
+    // Interior characters: lowercase alphanumeric or `-`.
+    chars_vec.iter().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
+/// Validate a Kubernetes DNS subdomain name (RFC 1123 §2.1 as applied by K8s).
+///
+/// A subdomain is a sequence of DNS labels joined by `.`, where each label
+/// obeys [`is_valid_k8s_label`] rules. The total length must not exceed 253
+/// characters.
+///
+/// K8s uses subdomain rules for resource names that can contain dots
+/// (e.g. config map keys, some annotation values). Pod and namespace names
+/// follow the stricter single-label rule; see [`is_valid_k8s_label`].
+///
+/// # Examples
+///
+/// ```
+/// use ravn_core::is_valid_k8s_subdomain;
+/// assert!(is_valid_k8s_subdomain("my-app"));
+/// assert!(is_valid_k8s_subdomain("api.payments.svc"));
+/// assert!(!is_valid_k8s_subdomain("My.App"));   // uppercase not allowed
+/// assert!(!is_valid_k8s_subdomain(""));          // empty not allowed
+/// ```
+pub fn is_valid_k8s_subdomain(s: &str) -> bool {
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    s.split('.').all(is_valid_k8s_label)
+}
+
 /// Failure resolving `{{param}}` placeholders against supplied values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
@@ -385,15 +422,21 @@ fn placeholders_in_capability(cap: &Capability) -> Vec<String> {
         | Capability::UnitState { unit } => placeholders_in_str(unit),
         // No string fields, so no placeholders.
         Capability::NixRollback => Vec::new(),
-        Capability::KubePodRestart { namespace, pod } => {
-            let mut names = placeholders_in_str(namespace);
-            names.extend(placeholders_in_str(pod));
-            names
+        // K8s capabilities — collect from all string fields.
+        Capability::DeletePod { namespace, pod } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(pod));
+            v
         }
-        Capability::KubeRolloutRestart { namespace, deployment } => {
-            let mut names = placeholders_in_str(namespace);
-            names.extend(placeholders_in_str(deployment));
-            names
+        Capability::RestartDeployment { namespace, deployment } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(deployment));
+            v
+        }
+        Capability::PodState { namespace, pod_prefix } => {
+            let mut v = placeholders_in_str(namespace);
+            v.extend(placeholders_in_str(pod_prefix));
+            v
         }
     }
 }
@@ -814,139 +857,139 @@ mod tests {
         let _ = schemars::schema_for!(RemediationRecord);
     }
 
-    // ── RFC 1123 DNS-label validation (issue #145) ────────────────────────
+    // ── K8s capability tests (#146) ──────────────────────────────────────────
 
     #[test]
-    fn k8s_label_accepts_valid_names() {
-        assert!(is_valid_k8s_label("my-app"));
-        assert!(is_valid_k8s_label("payments"));
-        assert!(is_valid_k8s_label("api-v2"));
-        assert!(is_valid_k8s_label("a")); // single char
-        assert!(is_valid_k8s_label("a0b1c2")); // mixed alphanum
-        assert!(is_valid_k8s_label(&"a".repeat(63))); // max length
-    }
-
-    #[test]
-    fn k8s_label_rejects_invalid_names() {
-        // Empty
-        assert!(!is_valid_k8s_label(""));
-        // Uppercase
-        assert!(!is_valid_k8s_label("MyApp"));
-        assert!(!is_valid_k8s_label("PAYMENTS"));
-        // Leading dash
-        assert!(!is_valid_k8s_label("-starts-dash"));
-        // Trailing dash
-        assert!(!is_valid_k8s_label("ends-dash-"));
-        // Dot (subdomain separator not allowed in single label)
-        assert!(!is_valid_k8s_label("my.app"));
-        // Underscore
-        assert!(!is_valid_k8s_label("my_app"));
-        // Spaces
-        assert!(!is_valid_k8s_label("my app"));
-        // Path traversal
-        assert!(!is_valid_k8s_label("../etc/passwd"));
-        // Newline injection
-        assert!(!is_valid_k8s_label("foo\nbar"));
-        // Over 63 chars
-        assert!(!is_valid_k8s_label(&"a".repeat(64)));
-        // Shell metacharacters
-        assert!(!is_valid_k8s_label("ns; rm -rf /"));
-        assert!(!is_valid_k8s_label("ns$(whoami)"));
-        assert!(!is_valid_k8s_label("ns`id`"));
-    }
-
-    #[test]
-    fn k8s_subdomain_accepts_dotted_names() {
-        assert!(is_valid_k8s_subdomain("my-app"));
-        assert!(is_valid_k8s_subdomain("api.payments.svc"));
-        assert!(is_valid_k8s_subdomain("a.b.c"));
-        // Max 253 chars (three 63-char labels joined by dots = 63+1+63+1+63 = 191 < 253)
-        let long_label = "a".repeat(63);
-        assert!(is_valid_k8s_subdomain(&format!("{long_label}.{long_label}.{long_label}")));
-    }
-
-    #[test]
-    fn k8s_subdomain_rejects_invalid_names() {
-        assert!(!is_valid_k8s_subdomain(""));
-        assert!(!is_valid_k8s_subdomain("My.App"));
-        assert!(!is_valid_k8s_subdomain(".leading-dot"));
-        assert!(!is_valid_k8s_subdomain("trailing-dot."));
-        // Over 253 chars
-        assert!(!is_valid_k8s_subdomain(&"a".repeat(254)));
-    }
-
-    #[test]
-    fn kube_pod_restart_resolve_validates_identifiers() {
-        let cap =
-            Capability::KubePodRestart { namespace: "{{ns}}".into(), pod: "{{pod}}".into() };
-
-        // Valid identifiers resolve successfully.
-        let mut vals = BTreeMap::new();
-        vals.insert("ns".to_string(), "payments".to_string());
-        vals.insert("pod".to_string(), "api-7d9f".to_string());
-        let resolved = cap.resolve(&vals).unwrap();
-        assert_eq!(
-            resolved,
-            Capability::KubePodRestart { namespace: "payments".into(), pod: "api-7d9f".into() }
-        );
-
-        // Uppercase namespace rejected.
-        let mut bad_vals = BTreeMap::new();
-        bad_vals.insert("ns".to_string(), "Payments".to_string());
-        bad_vals.insert("pod".to_string(), "api-7d9f".to_string());
-        let err = cap.resolve(&bad_vals).unwrap_err();
-        assert!(matches!(err, RenderError::InvalidKubeIdentifier(ref f, _) if f == "namespace"));
-
-        // Path-traversal pod name rejected.
-        let mut bad_vals2 = BTreeMap::new();
-        bad_vals2.insert("ns".to_string(), "payments".to_string());
-        bad_vals2.insert("pod".to_string(), "../etc/passwd".to_string());
-        let err2 = cap.resolve(&bad_vals2).unwrap_err();
-        assert!(matches!(err2, RenderError::InvalidKubeIdentifier(ref f, _) if f == "pod"));
-    }
-
-    #[test]
-    fn kube_rollout_restart_resolve_validates_identifiers() {
-        let cap = Capability::KubeRolloutRestart {
-            namespace: "{{ns}}".into(),
-            deployment: "{{dep}}".into(),
+    fn kube_capabilities_are_internally_tagged() {
+        // delete_pod
+        let cap = Capability::DeletePod {
+            namespace: "ravn-test".into(),
+            pod: "crasher-abc12".into(),
         };
-
-        // Injection-shaped deployment name rejected.
-        let mut vals = BTreeMap::new();
-        vals.insert("ns".to_string(), "staging".to_string());
-        vals.insert("dep".to_string(), "api; curl evil.com".to_string());
-        let err = cap.resolve(&vals).unwrap_err();
-        assert!(matches!(err, RenderError::InvalidKubeIdentifier(ref f, _) if f == "deployment"));
-
-        // Overly long name (> 63 chars) rejected.
-        let mut vals2 = BTreeMap::new();
-        vals2.insert("ns".to_string(), "staging".to_string());
-        vals2.insert("dep".to_string(), "a".repeat(64));
-        let err2 = cap.resolve(&vals2).unwrap_err();
-        assert!(matches!(err2, RenderError::InvalidKubeIdentifier(ref f, _) if f == "deployment"));
-    }
-
-    #[test]
-    fn kube_capabilities_are_wire_tagged() {
-        let pod_cap = Capability::KubePodRestart {
-            namespace: "payments".into(),
-            pod: "api-7d9f".into(),
-        };
-        let json = serde_json::to_value(&pod_cap).unwrap();
-        assert_eq!(json["capability"], "kube_pod_restart");
-        assert_eq!(json["namespace"], "payments");
-        assert_eq!(json["pod"], "api-7d9f");
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["capability"], "delete_pod");
+        assert_eq!(json["namespace"], "ravn-test");
+        assert_eq!(json["pod"], "crasher-abc12");
         let back: Capability = serde_json::from_value(json).unwrap();
-        assert_eq!(back, pod_cap);
+        assert_eq!(back, cap);
 
-        let rollout_cap = Capability::KubeRolloutRestart {
-            namespace: "staging".into(),
+        // restart_deployment
+        let cap2 = Capability::RestartDeployment {
+            namespace: "ravn-test".into(),
             deployment: "api".into(),
         };
-        let json2 = serde_json::to_value(&rollout_cap).unwrap();
-        assert_eq!(json2["capability"], "kube_rollout_restart");
+        let json2 = serde_json::to_value(&cap2).unwrap();
+        assert_eq!(json2["capability"], "restart_deployment");
         let back2: Capability = serde_json::from_value(json2).unwrap();
-        assert_eq!(back2, rollout_cap);
+        assert_eq!(back2, cap2);
+
+        // pod_state
+        let cap3 =
+            Capability::PodState { namespace: "ravn-test".into(), pod_prefix: "crasher".into() };
+        let json3 = serde_json::to_value(&cap3).unwrap();
+        assert_eq!(json3["capability"], "pod_state");
+        let back3: Capability = serde_json::from_value(json3).unwrap();
+        assert_eq!(back3, cap3);
+    }
+
+    #[test]
+    fn kube_pod_state_is_read_only_others_are_not() {
+        assert!(Capability::PodState {
+            namespace: "ns".into(),
+            pod_prefix: "p".into()
+        }
+        .is_read_only());
+        assert!(!Capability::DeletePod { namespace: "ns".into(), pod: "p".into() }.is_read_only());
+        assert!(!Capability::RestartDeployment {
+            namespace: "ns".into(),
+            deployment: "d".into()
+        }
+        .is_read_only());
+    }
+
+    #[test]
+    fn kube_capabilities_resolve_placeholders() {
+        let mut params = BTreeMap::new();
+        params.insert("ns".to_string(), "ravn-test".to_string());
+        params.insert("pod".to_string(), "crasher-abc".to_string());
+
+        let cap = Capability::DeletePod {
+            namespace: "{{ns}}".into(),
+            pod: "{{pod}}".into(),
+        };
+        let resolved = cap.resolve(&params).unwrap();
+        assert_eq!(
+            resolved,
+            Capability::DeletePod { namespace: "ravn-test".into(), pod: "crasher-abc".into() }
+        );
+    }
+
+    #[test]
+    fn kube_pod_state_can_be_used_as_verify_check() {
+        // PodState is read-only, so it is valid in a Verify post-condition.
+        let template_src = r#"
+            id = "k8s-pod-restart"
+            version = 1
+            title = "Restart a CrashLooping pod"
+            risk_tier = "safe"
+            [match]
+            source = "kube_workload"
+            [parameters]
+            namespace = { type = "string", from = "payload.namespace" }
+            pod       = { type = "string", from = "payload.name" }
+            [[steps]]
+            capability = "delete_pod"
+            namespace  = "{{namespace}}"
+            pod        = "{{pod}}"
+            [verify]
+            equals    = "Running"
+            timeout_s = 60
+            check     = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+        "#;
+        let tpl: Template = toml::from_str(template_src).expect("parse");
+        tpl.validate().expect("template must be valid");
+        assert_eq!(tpl.id, "k8s-pod-restart");
+    }
+
+    #[test]
+    fn envelope_with_kube_steps_round_trips() {
+        let now = Utc::now();
+        let env = CommandEnvelope {
+            command_id: Uuid::now_v7(),
+            agent_id: AgentId(Uuid::now_v7()),
+            template_id: "k8s-pod-restart".into(),
+            template_version: 1,
+            risk_tier: RiskTier::Safe,
+            preconditions: vec![Condition {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "CrashLoopBackOff".into(),
+            }],
+            steps: vec![Capability::DeletePod {
+                namespace: "ravn-test".into(),
+                pod: "crasher-abc12".into(),
+            }],
+            verify: Some(Verify {
+                check: Capability::PodState {
+                    namespace: "ravn-test".into(),
+                    pod_prefix: "crasher".into(),
+                },
+                equals: "Running".into(),
+                timeout_s: 60,
+            }),
+            rollback: Rollback::None,
+            approval_ref: ApprovalRef::PolicyAuto,
+            nonce: "kube-nonce-1".into(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            sig: None,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let back: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(env, back);
+        // Signing payload must be deterministic regardless of K8s fields.
+        assert_eq!(env.signing_payload(), back.signing_payload());
     }
 }

@@ -1,0 +1,46 @@
+# Template: k8s-pod-restart (#146)
+#
+# Heals a CrashLoopBackOff / OOMKilled / BackOff pod by deleting it so the
+# owning controller (Deployment / ReplicaSet) recreates it on a fresh node
+# allocation.
+#
+# Risk: Safe — deleting a pod owned by a controller is idempotent; the
+#       controller recreates it immediately. No data is lost.
+#
+# Precondition: the pod phase must NOT already be Running (guard against
+#   healing a pod that recovered on its own between detect and act).
+#
+# Verify: within 60 s the replacement pod should transition to "Running".
+#
+# Rollback: none — deleting a pod and letting the controller restart it is
+#   already the rollback strategy for this class of failure.
+
+id = "k8s-pod-restart"
+version = 1
+title = "Restart a CrashLooping Kubernetes pod by deleting it"
+risk_tier = "safe"
+
+[match]
+source = "kube_workload"
+conditions = { reason = "CrashLoopBackOff" }
+
+[parameters]
+namespace = { type = "string", from = "payload.namespace" }
+pod       = { type = "string", from = "payload.name" }
+
+[[preconditions]]
+# Only act if the pod is not already healthy.
+check  = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals = "CrashLoopBackOff"
+
+[[steps]]
+capability = "delete_pod"
+namespace  = "{{namespace}}"
+pod        = "{{pod}}"
+
+[verify]
+check      = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals     = "Running"
+timeout_s  = 60
+
+rollback = "none"

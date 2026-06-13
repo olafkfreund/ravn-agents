@@ -1,0 +1,37 @@
+# Template: k8s-pod-log-restart (#146)
+#
+# Variant of k8s-pod-restart triggered by the BackOff reason (the kubelet
+# backs off restarting a failed container, logged as "Back-off restarting
+# failed container"). The action is identical — delete the pod and let the
+# controller recreate it — but the trigger reason differs.
+#
+# Risk: Safe — see k8s-pod-restart.toml.
+
+id = "k8s-pod-log-restart"
+version = 1
+title = "Restart a BackOff Kubernetes pod by deleting it"
+risk_tier = "safe"
+
+[match]
+source = "kube_workload"
+conditions = { reason = "BackOff" }
+
+[parameters]
+namespace = { type = "string", from = "payload.namespace" }
+pod       = { type = "string", from = "payload.name" }
+
+[[preconditions]]
+check  = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals = "CrashLoopBackOff"
+
+[[steps]]
+capability = "delete_pod"
+namespace  = "{{namespace}}"
+pod        = "{{pod}}"
+
+[verify]
+check     = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals    = "Running"
+timeout_s = 60
+
+rollback = "none"

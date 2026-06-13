@@ -1,0 +1,136 @@
+# RBAC for ravn-k8s-executor (#146)
+#
+# Principle of least privilege:
+#   - No cluster-admin, no ClusterRole.
+#   - One Role per capability set, namespaced to the workload namespaces the
+#     executor acts on. Extend `subjects` in the RoleBindings (or duplicate
+#     the bindings) for each additional target namespace.
+#   - The ServiceAccount lives in the executor's own namespace (`ravn-system`).
+#   - Pod-state reads (list/get pods) are in a separate Role from write
+#     operations (delete pods, patch deployments) so capabilities can be
+#     granted independently if needed.
+#
+# To add a new target namespace, copy the RoleBinding blocks below and change
+# the `namespace:` field in `metadata` to the new namespace.
+
+# ── Namespace for the ravn system components ──────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ravn-system
+  labels:
+    app.kubernetes.io/part-of: ravn
+
+---
+# ── ServiceAccount for ravn-k8s-executor ─────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ravn-k8s-executor
+  namespace: ravn-system
+  labels:
+    app.kubernetes.io/name: ravn-k8s-executor
+    app.kubernetes.io/part-of: ravn
+
+---
+# ── Role: read pod state (PodState capability) ────────────────────────────────
+# Grants list + get on pods in the target namespace. Used by the `pod_state`
+# read-only check capability — precondition checks and verify post-conditions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ravn-executor-pod-reader
+  namespace: ravn-test          # duplicate for every target namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+# ── Role: delete pods (DeletePod capability) ─────────────────────────────────
+# Grants delete on pods in the target namespace. The owning Deployment /
+# ReplicaSet / StatefulSet controller recreates the pod automatically.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ravn-executor-pod-deleter
+  namespace: ravn-test          # duplicate for every target namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+
+---
+# ── Role: restart deployments (RestartDeployment capability) ─────────────────
+# Grants patch on deployments in the target namespace. The patch sets the
+# `restartedAt` annotation on the pod template — equivalent to
+# `kubectl rollout restart deployment/<name>`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ravn-executor-deployment-restarter
+  namespace: ravn-test          # duplicate for every target namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+
+---
+# ── RoleBinding: pod-reader → ravn-k8s-executor SA ───────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ravn-executor-pod-reader
+  namespace: ravn-test          # must match the Role's namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+subjects:
+  - kind: ServiceAccount
+    name: ravn-k8s-executor
+    namespace: ravn-system
+roleRef:
+  kind: Role
+  name: ravn-executor-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── RoleBinding: pod-deleter → ravn-k8s-executor SA ─────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ravn-executor-pod-deleter
+  namespace: ravn-test          # must match the Role's namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+subjects:
+  - kind: ServiceAccount
+    name: ravn-k8s-executor
+    namespace: ravn-system
+roleRef:
+  kind: Role
+  name: ravn-executor-pod-deleter
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── RoleBinding: deployment-restarter → ravn-k8s-executor SA ─────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ravn-executor-deployment-restarter
+  namespace: ravn-test          # must match the Role's namespace
+  labels:
+    app.kubernetes.io/part-of: ravn
+subjects:
+  - kind: ServiceAccount
+    name: ravn-k8s-executor
+    namespace: ravn-system
+roleRef:
+  kind: Role
+  name: ravn-executor-deployment-restarter
+  apiGroup: rbac.authorization.k8s.io

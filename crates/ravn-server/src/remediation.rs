@@ -620,7 +620,7 @@ mod tests {
             },
             parameters,
             preconditions: vec![],
-            steps: vec![Capability::KubePodRestart {
+            steps: vec![Capability::DeletePod {
                 namespace: "{{namespace}}".to_string(),
                 pod: "{{pod}}".to_string(),
             }],

@@ -94,8 +94,9 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
         | Capability::RestartUnit { unit }
         | Capability::UnitState { unit } => Some(unit),
         Capability::NixRollback
-        | Capability::KubePodRestart { .. }
-        | Capability::KubeRolloutRestart { .. } => None,
+        | Capability::DeletePod { .. }
+        | Capability::RestartDeployment { .. }
+        | Capability::PodState { .. } => None,
     }
 }
 
@@ -103,14 +104,35 @@ fn capability_unit(cap: &Capability) -> Option<&str> {
 /// Returns an empty slice for capabilities that carry no K8s identifiers.
 fn capability_kube_ids(cap: &Capability) -> Vec<(&'static str, &str)> {
     match cap {
-        Capability::KubePodRestart { namespace, pod } => {
+        Capability::DeletePod { namespace, pod } => {
             vec![("namespace", namespace.as_str()), ("pod", pod.as_str())]
         }
-        Capability::KubeRolloutRestart { namespace, deployment } => {
+        Capability::RestartDeployment { namespace, deployment } => {
             vec![("namespace", namespace.as_str()), ("deployment", deployment.as_str())]
+        }
+        Capability::PodState { namespace, pod_prefix } => {
+            vec![("namespace", namespace.as_str()), ("pod_prefix", pod_prefix.as_str())]
         }
         _ => Vec::new(),
     }
+}
+
+/// Whether any step or check in the envelope is a Kubernetes capability. The host
+/// actuator cannot execute these — they belong to the in-cluster executor (#146),
+/// which calls [`handle_command`] directly. The host actuator therefore rejects
+/// such envelopes at its socket boundary (see [`handle_connection`]).
+fn envelope_contains_kube_capability(env: &CommandEnvelope) -> bool {
+    let is_kube = |c: &Capability| {
+        matches!(
+            c,
+            Capability::DeletePod { .. }
+                | Capability::RestartDeployment { .. }
+                | Capability::PodState { .. }
+        )
+    };
+    env.preconditions.iter().any(|c| is_kube(&c.check))
+        || env.steps.iter().any(is_kube)
+        || env.verify.as_ref().is_some_and(|v| is_kube(&v.check))
 }
 
 /// Handle one command end-to-end: verify the envelope, validate inputs, check
@@ -277,11 +299,12 @@ async fn perform_rollback(
 /// printed state regardless of exit code (it exits non-zero for inactive/failed
 /// units while still naming the state).
 ///
-/// Kubernetes capabilities ([`Capability::KubePodRestart`],
-/// [`Capability::KubeRolloutRestart`]) are not handled by this executor — they
-/// require a separate in-cluster executor that holds a kubeconfig or
-/// ServiceAccount token. Reaching them here is a programmer error and returns
-/// an [`ExecError`].
+/// Kubernetes capabilities ([`Capability::DeletePod`],
+/// [`Capability::RestartDeployment`], [`Capability::PodState`]) are not handled
+/// by this executor — they require a separate in-cluster executor that holds a
+/// kubeconfig or ServiceAccount token. The host actuator rejects such envelopes
+/// at its socket boundary, so reaching these arms is a programmer error and
+/// returns an [`ExecError`].
 pub struct SystemctlExecutor;
 
 impl CapabilityExecutor for SystemctlExecutor {
@@ -332,12 +355,16 @@ fn run_systemctl_sync(cap: &Capability) -> Result<Option<String>, ExecError> {
         }
         // Kubernetes capabilities require a separate in-cluster executor; they
         // must never reach the systemd executor on a non-K8s host.
-        Capability::KubePodRestart { namespace, pod } => Err(ExecError(format!(
-            "KubePodRestart ({namespace}/{pod}) reached systemctl executor — \
+        Capability::DeletePod { namespace, pod } => Err(ExecError(format!(
+            "DeletePod ({namespace}/{pod}) reached systemctl executor — \
              K8s capabilities require an in-cluster executor"
         ))),
-        Capability::KubeRolloutRestart { namespace, deployment } => Err(ExecError(format!(
-            "KubeRolloutRestart ({namespace}/{deployment}) reached systemctl executor — \
+        Capability::RestartDeployment { namespace, deployment } => Err(ExecError(format!(
+            "RestartDeployment ({namespace}/{deployment}) reached systemctl executor — \
+             K8s capabilities require an in-cluster executor"
+        ))),
+        Capability::PodState { namespace, pod_prefix } => Err(ExecError(format!(
+            "PodState ({namespace}/{pod_prefix}) reached systemctl executor — \
              K8s capabilities require an in-cluster executor"
         ))),
     }
@@ -432,7 +459,24 @@ async fn handle_connection(
         return Ok(());
     }
     let env: CommandEnvelope = serde_json::from_str(line.trim())?;
-    let result = handle_command(executor, key, &env).await;
+    // The host actuator cannot execute Kubernetes capabilities — those belong to
+    // the in-cluster executor (#146), which invokes `handle_command` directly.
+    // Reject at this boundary rather than inside `handle_command` so the K8s
+    // executor's own path is never short-circuited.
+    let result = if envelope_contains_kube_capability(&env) {
+        ActionResult {
+            command_id: env.command_id,
+            status: ActionStatus::Rejected,
+            detail: Some(
+                "command contains Kubernetes capabilities; route to the in-cluster K8s executor (#146)"
+                    .into(),
+            ),
+            observed_state: None,
+            finished_at: Utc::now(),
+        }
+    } else {
+        handle_command(executor, key, &env).await
+    };
     let mut out = serde_json::to_vec(&result)?;
     out.push(b'\n');
     reader.into_inner().write_all(&out).await?;
@@ -650,7 +694,7 @@ mod tests {
             template_version: 1,
             risk_tier: RiskTier::Guarded,
             preconditions: vec![],
-            steps: vec![Capability::KubePodRestart {
+            steps: vec![Capability::DeletePod {
                 namespace: namespace.into(),
                 pod: pod.into(),
             }],
@@ -671,10 +715,22 @@ mod tests {
         let key = generate_signing_key();
         let env = signed_kube_pod_restart_envelope(&key, "payments", "api-7d9f");
         let exec = MockExecutor::new("active");
-        // The MockExecutor doesn't know about KubePodRestart and returns Ok(None),
-        // so the command succeeds at the validation level.
+        // `handle_command` itself does not reject K8s capabilities (the in-cluster
+        // executor relies on it). The MockExecutor returns Ok(None) for DeletePod,
+        // so a well-formed identifier passes validation and is not rejected.
         let result = handle_command(&exec, &key.verifying_key(), &env).await;
         assert_ne!(result.status, ActionStatus::Rejected, "valid K8s identifiers must pass");
+    }
+
+    #[test]
+    fn host_actuator_guard_flags_kube_capabilities() {
+        let key = generate_signing_key();
+        // An envelope with a K8s step is flagged for host-actuator rejection.
+        let kube = signed_kube_pod_restart_envelope(&key, "payments", "api-7d9f");
+        assert!(envelope_contains_kube_capability(&kube));
+        // A systemd envelope is not.
+        let systemd = signed_envelope(&key, EnvelopeOpts::default());
+        assert!(!envelope_contains_kube_capability(&systemd));
     }
 
     #[tokio::test]

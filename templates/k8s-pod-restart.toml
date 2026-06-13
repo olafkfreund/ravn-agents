@@ -22,7 +22,7 @@ risk_tier = "safe"
 
 [match]
 source = "kube_workload"
-conditions = { reason = "CrashLoopBackOff" }
+conditions = { "payload.reason" = "CrashLoopBackOff" }
 
 [parameters]
 namespace = { type = "string", from = "payload.namespace" }

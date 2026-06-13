@@ -18,7 +18,9 @@ suggested next check.
 
 It runs on **standalone Linux hosts**, on **Kubernetes**, and on **fully
 air-gapped networks** — inference is local and CPU-only, so nothing has to leave
-your infrastructure.
+your infrastructure. Today the *healing* loop executes on Linux/NixOS hosts;
+Kubernetes is detection + proposal so far, with the in-cluster executor on the
+[roadmap]({{ '/roadmap/' | relative_url }}).
 
 Named for the raven — Odin's scouts that fly out across the world and return to tell
 him what they saw.

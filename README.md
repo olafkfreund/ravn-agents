@@ -34,7 +34,8 @@ tell him what they saw.
 - **Auditable by design.** Default-deny policy with risk tiers, Ed25519-signed
   command envelopes, a privilege-separated actuator that re-verifies every
   signature, circuit breakers, a fleet kill switch, and an audit record for every
-  proposal, approval, and outcome.
+  proposal, approval, and outcome. *(The audit store is in-memory today; durable
+  Postgres persistence is [#143](https://github.com/olafkfreund/ravn-agents/issues/143).)*
 - **Self-hosted everywhere.** Single static binaries, first-class NixOS modules,
   OCI images, Kubernetes manifests. No SaaS dependency, no vendor lock-in, no
   data leaving your network — air-gapped deployments are a supported target, not
@@ -45,8 +46,10 @@ tell him what they saw.
 Three planes:
 
 - **Edge** — `ravnd`, the agent on each host (plus a read-only controller per
-  Kubernetes cluster): detection taps, local inference, and a small privileged
-  actuator for approved fixes.
+  Kubernetes cluster): detection taps, local inference, and — on hosts — a small
+  privileged actuator for approved fixes. The K8s controller is detection-only
+  today; in-cluster execution is deferred
+  ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)).
 - **Control plane** — `ravn-server`: ingestion, storage, policy, approvals, API.
 - **Portal** — the web UI: inventory, live messages, remediation approvals and
   audit, topology.

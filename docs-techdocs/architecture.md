@@ -101,12 +101,14 @@ wrong, and a remediation only ever runs because a deterministic fault matched a
 template *and* the gate allowed it. The proposal itself is deterministic too — the
 LLM is never in the propose/act path (it explains, it never decides).
 
-**Scope today:** execution is shipped for **Linux/NixOS hosts** only. K8s templates
-(`k8s-pod-restart.toml`, `k8s-pod-log-restart.toml`) exist and the cluster controller
-detects + the server proposes, but there is **no in-cluster executor yet**
-([#146](https://github.com/olafkfreund/ravn-agents/issues/146)). The audit trail is
-currently in-memory and not durable across restarts
-([#143](https://github.com/olafkfreund/ravn-agents/issues/143)).
+**Scope today:** execution is shipped for **Linux/NixOS hosts**. The **in-cluster
+Kubernetes executor** has now landed ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)):
+it re-verifies the signed envelope in-cluster and runs the typed `delete_pod` /
+`restart_deployment` / `pod_state` capabilities under least-privilege RBAC, driven
+by the same `k8s-pod-restart.toml` / `k8s-pod-log-restart.toml` templates — pending
+k3d end-to-end verification before release. The audit trail is now **durable in
+Postgres** ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)): every
+state transition is written to an append-only table that survives a restart.
 
 ## Portal (React + TypeScript)
 

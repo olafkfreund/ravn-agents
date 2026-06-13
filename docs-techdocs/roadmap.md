@@ -16,7 +16,7 @@ milestone maps to one or more [epics](https://github.com/olafkfreund/ravn-agents
 | M3 | Topology view + categories | ✅ Shipped |
 | M4 | Packaging (NixOS, OCI) + auth hardening | ✅ Shipped |
 | M5 | Kubernetes plane (controller + node-agent) | ✅ Shipped |
-| M6 | Supervised self-healing (PARR) — **hosts** | ✅ Shipped (P1–P4); K8s execution deferred |
+| M6 | Supervised self-healing (PARR) | ✅ Shipped (P1–P4, hosts); ◑ K8s executor landed, k3d verification pending |
 | M7 | Alert routing + dashboards | 🚧 Next |
 
 ## ✅ M0–M3 — Skeleton, detection, portal, topology
@@ -47,7 +47,8 @@ signals share one `ravn-core` type system and read alike in the portal.
 ## ◑ M6 — Supervised self-healing (PARR), on hosts
 
 The big one. Detection closes the loop — under human control by default. Shipped
-for **Linux/NixOS hosts**; the Kubernetes execution surface is deferred (see below).
+for **Linux/NixOS hosts**; the Kubernetes execution surface has now landed on the
+M6 hardening branch and is pending k3d end-to-end verification (see P5 below).
 The loop runs through five phases; here is the honest per-phase status.
 
 - ✅ **P1 — Prepare / Act / Reflect / Review (PARR), manual-approval-only.** A
@@ -63,16 +64,21 @@ The loop runs through five phases; here is the honest per-phase status.
 - ✅ **P4 — Knowledge base.** Retrospectives accumulate into per-environment
   markdown with deterministic recall, so the fleet gets better at explaining
   itself over time.
-- 🚧 **P5 — Breadth & K8s execution.** The **Kubernetes execution surface** is
-  **deferred**: `templates/k8s-pod-restart.toml` and `k8s-pod-log-restart.toml`
-  exist and the controller detects + the server proposes, but there is **no
-  in-cluster executor yet** — host remediation only runs today. Tracked by
-  [#146](https://github.com/olafkfreund/ravn-agents/issues/146). Approval via
-  alert sinks (Slack/ntfy actionable buttons) is also part of this phase.
+- ◑ **P5 — Breadth & K8s execution.** The **in-cluster Kubernetes executor** now
+  exists ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)): it pulls
+  signed `CommandEnvelope`s, re-verifies the Ed25519 signature in-cluster, and runs
+  the typed `delete_pod` / `restart_deployment` / `pod_state` capabilities under
+  least-privilege namespaced RBAC, with the same precondition/verify/rollback loop
+  as the host actuator. Landed on the M6 hardening branch; the full **k3d
+  end-to-end** heal (detect → propose → approve → execute → verify) is pending
+  verification on a real cluster before release. Approval via alert sinks
+  (Slack/ntfy actionable buttons) remains future work.
 
-> **Durability caveat.** The remediation audit trail is currently in-memory and is
-> lost on a control-plane restart; moving it to Postgres is
-> [#143](https://github.com/olafkfreund/ravn-agents/issues/143).
+> **Durability.** The remediation audit trail is now persisted to Postgres
+> ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)) — every state
+> transition (proposal → decision → command → result) is written to an append-only
+> `remediation_records` table, so the audit history survives a control-plane
+> restart. (The restart-survival E2E test runs against a live Postgres.)
 
 The host loop runs on one machine via the [demo](https://github.com/olafkfreund/ravn-agents/blob/main/demo/README.md):
 a NixOS host, a k3d cluster (detection-only), **GPU-accelerated** local explanations
@@ -87,7 +93,10 @@ severity/category — **not yet wired**: there is no alert-routing backend endpo
 today, and the portal does not yet expose routing configuration. Plus richer portal
 dashboards. Beyond this: more detection taps, more remediation templates, more models.
 
-The model-eval harness (`ravn-eval`) is a separate track: a runnable benchmark today
-(prompt/generation throughput, latency, memory, a deterministic quality score) — its
-remaining work is the **fixture corpus and a published comparison page**, tracked by
-[#157](https://github.com/olafkfreund/ravn-agents/issues/157).
+The model-eval harness (`ravn-eval`) is a separate track and now produces a
+reproducible **scored comparison table** across several small models from a
+committed **fixture corpus** (failed units, OOMKills, auth anomalies, drift) with
+reference explanations, scoring faithfulness + actionability + latency/RAM — runnable
+in the Nix sandbox with no model via recorded backends
+([#157](https://github.com/olafkfreund/ravn-agents/issues/157)). Remaining: publishing
+the results as a site page and capturing live (non-recorded) numbers.

@@ -131,10 +131,11 @@ design.
   (Prepare/Act/Reflect/Review): deterministic template matching (the LLM never
   decides), **Ed25519-signed** commands, a **privileged actuator** under privilege
   separation, an at-most-once ledger, a default-deny policy + circuit breaker,
-  verify/rollback, and a retrospective knowledge base. *K8s remediation is
-  detection + proposal only — the in-cluster executor is deferred
-  ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)); the audit trail
-  is in-memory today ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)).*
+  verify/rollback, and a retrospective knowledge base. *The in-cluster K8s executor
+  has landed ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)) and the
+  audit trail is now durable in Postgres
+  ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)) — both pending final
+  end-to-end verification (k3d / live Postgres) before release.*
 - **One-box demo** — a NixOS host, a k3d cluster, and **GPU-accelerated** local
   explanations (AMD ROCm / NVIDIA / CPU), with a live `kill → propose → approve →
   heal` loop — `scripts/demo-up.sh`.

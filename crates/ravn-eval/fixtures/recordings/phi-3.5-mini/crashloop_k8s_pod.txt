@@ -1,0 +1,1 @@
+{"explanation": "Pod worker-5f8b in the payments namespace is in CrashLoopBackOff with 9 restarts. The worker container starts and then exits quickly, so Kubernetes keeps backing off before retrying. The cause is in the application itself and should be visible in the prior container logs.", "suggested_check": "kubectl -n payments logs worker-5f8b --previous"}

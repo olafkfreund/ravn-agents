@@ -1,0 +1,20 @@
+{
+  "id": "019ed100-1000-7000-8000-000000000003",
+  "occurred_at": "2026-05-01T09:48:12Z",
+  "observed_at": "2026-05-01T09:48:13Z",
+  "agent_id": "019ed100-0000-7000-8000-0000000000aa",
+  "host": "node-gke-2",
+  "severity": "critical",
+  "title": "OOMKilled: checkout/api-7c9d",
+  "category_hints": ["kubernetes", "memory"],
+  "payload": {
+    "kind": "kube_workload",
+    "namespace": "checkout",
+    "object_kind": "Pod",
+    "name": "api-7c9d",
+    "reason": "OOMKilled",
+    "message": "Container api was OOMKilled (exceeded memory limit 512Mi)",
+    "count": 4,
+    "container": "api"
+  }
+}

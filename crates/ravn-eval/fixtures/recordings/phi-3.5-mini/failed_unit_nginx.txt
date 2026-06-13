@@ -1,0 +1,1 @@
+{"explanation": "The nginx.service unit on web-01 failed with an exit-code result. According to the log, nginx was unable to bind to port 80 because the address is already in use by another process. Until the conflicting process is stopped, nginx will not start.", "suggested_check": "systemctl status nginx and check what is using the port"}

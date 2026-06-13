@@ -1,0 +1,20 @@
+{
+  "id": "019ed100-1000-7000-8000-000000000001",
+  "occurred_at": "2026-05-01T08:14:02Z",
+  "observed_at": "2026-05-01T08:14:02Z",
+  "agent_id": "019ed100-0000-7000-8000-0000000000aa",
+  "host": "web-01",
+  "severity": "error",
+  "title": "unit failed: nginx.service",
+  "category_hints": ["web", "systemd"],
+  "payload": {
+    "kind": "failed_unit",
+    "unit": "nginx.service",
+    "result": "exit-code",
+    "recent_log": [
+      "nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)",
+      "nginx: [emerg] still could not bind()",
+      "systemd[1]: nginx.service: Failed with result 'exit-code'."
+    ]
+  }
+}

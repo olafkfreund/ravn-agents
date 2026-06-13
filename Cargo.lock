@@ -2482,6 +2482,7 @@ name = "ravn-eval"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "ravn-agent",
  "ravn-core",

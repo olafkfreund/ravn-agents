@@ -1,0 +1,1 @@
+{"explanation": "The worker container in pod worker-5f8b (namespace payments) is in CrashLoopBackOff and has restarted 9 times: it starts, exits or crashes immediately, and Kubernetes backs off before retrying. This is an application-level failure, so the previous container's logs will show why it is exiting.", "suggested_check": "kubectl -n payments logs worker-5f8b --previous"}

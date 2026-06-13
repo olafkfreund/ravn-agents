@@ -1,0 +1,8 @@
+{
+  "category": "auth_anomaly",
+  "reference_explanation": "bastion-01 saw repeated failed SSH logins for the root account from 203.0.113.7 — the pattern of many failures from a single remote address is consistent with a brute-force or credential-stuffing attempt. None succeeded, but the source should be blocked and direct root SSH should be disabled.",
+  "must_mention": ["root", "203.0.113.7", "ssh", "bastion-01"],
+  "forbidden": ["successful login", "logged in", "password changed", "sudo granted", "disk", "memory"],
+  "expected_check": "grep 203.0.113.7 /var/log/auth.log",
+  "check_keywords": ["auth.log", "203.0.113.7"]
+}

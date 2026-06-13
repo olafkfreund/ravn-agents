@@ -1,0 +1,8 @@
+{
+  "model": "phi-3.5-mini",
+  "captured_on": "llama-server b4400, Q4_K_M, 8 threads, AMD Ryzen 7 7840U (CPU only)",
+  "latency_ms": 2310.0,
+  "gen_tps": 11.8,
+  "prompt_tps": 138.0,
+  "mem_mb": 2820.0
+}

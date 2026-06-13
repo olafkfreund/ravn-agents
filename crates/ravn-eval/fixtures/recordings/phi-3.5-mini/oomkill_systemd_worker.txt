@@ -1,0 +1,1 @@
+{"explanation": "ingest-worker.service on worker-03 was stopped by the OOM killer (result oom-kill) after its memory consumption climbed to about 2GB. This indicates excessive memory use, likely a leak. Simply restarting the unit will not resolve the underlying memory growth.", "suggested_check": "journalctl -u ingest-worker.service | grep -i 'out of memory'"}

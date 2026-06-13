@@ -245,7 +245,7 @@ pub async fn run(
     config: Config,
     agent_id: AgentId,
     host: String,
-    publisher: Publisher,
+    publisher: std::sync::Arc<Publisher>,
 ) -> anyhow::Result<()> {
     let api: Api<Pod> = match &config.namespace {
         Some(ns) => Api::namespaced(client.clone(), ns),

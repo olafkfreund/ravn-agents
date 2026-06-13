@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ReactFlow, Background, Controls, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { getTopology, type Topology as TopologyData } from "../lib/api";
+import { getTopology, listAgents, listEvents, type Topology as TopologyData } from "../lib/api";
 import { SEVERITY_ORDER, severityMeta, severityVar, type SeverityKey } from "../lib/format";
 import { AgentNode } from "../components/topology/AgentNode";
 import { GroupNode } from "../components/topology/GroupNode";
+import { AgentDrawer } from "../components/AgentDrawer";
 
 const nodeTypes = { agent: AgentNode, group: GroupNode };
 
@@ -56,7 +57,7 @@ function buildNodes(t: TopologyData | undefined, filter: Filter): Node[] {
     const n = Math.max(g.nodes.length, 1);
     const rows = Math.ceil(n / COLS);
     const cols = Math.min(COLS, n);
-    const gw = cols * NW + (cols + 1) * PAD;
+    const gw = Math.max(cols * NW + (cols + 1) * PAD, 300);
     const gh = HEADER + rows * NH + (rows + 1) * PAD;
 
     if (x > 0 && x + gw > MAX_ROW) {
@@ -73,7 +74,13 @@ function buildNodes(t: TopologyData | undefined, filter: Filter): Node[] {
       id: gid,
       type: "group",
       position: { x, y },
-      data: { label: g.key, count: g.nodes.length, severity: groupSeverity, dimmed: active && !groupMatch },
+      data: {
+        label: g.key,
+        count: g.nodes.length,
+        severity: groupSeverity,
+        dimmed: active && !groupMatch,
+        nodes: g.nodes, // Pass nodes info (including labels) to GroupNode
+      },
       style: { width: gw, height: gh },
       draggable: false,
       selectable: false,
@@ -93,6 +100,7 @@ function buildNodes(t: TopologyData | undefined, filter: Filter): Node[] {
           status: node.status,
           severity: node.severity,
           dimmed: active && !matches(node.host, node.severity),
+          labels: node.labels, // Pass individual agent labels to AgentNode
         },
         draggable: false,
       });
@@ -108,10 +116,23 @@ export function Topology() {
   const [groupBy, setGroupBy] = useState("");
   const [q, setQ] = useState("");
   const [sev, setSev] = useState<Set<SeverityKey>>(new Set());
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["topology", groupBy],
     queryFn: () => getTopology(groupBy || undefined),
+    refetchInterval: 10_000,
+  });
+
+  const { data: allAgents } = useQuery({
+    queryKey: ["agents"],
+    queryFn: listAgents,
+    refetchInterval: 10_000,
+  });
+
+  const { data: allEvents } = useQuery({
+    queryKey: ["events"],
+    queryFn: () => listEvents(200),
     refetchInterval: 10_000,
   });
 
@@ -128,12 +149,29 @@ export function Topology() {
       setAutoGrouped(true);
     }
   }, [autoGrouped, groupBy, dimensions]);
+
   const toggleSev = (k: SeverityKey) =>
     setSev((prev) => {
       const next = new Set(prev);
       next.has(k) ? next.delete(k) : next.add(k);
       return next;
     });
+
+  const onNodeClick = (_event: React.MouseEvent, node: Node) => {
+    if (node.type === "agent") {
+      setSelectedAgentId(node.id);
+    }
+  };
+
+  const selectedAgent = useMemo(() => {
+    if (!selectedAgentId || !allAgents) return null;
+    return allAgents.find((a) => a.agent_id === selectedAgentId) || null;
+  }, [selectedAgentId, allAgents]);
+
+  const selectedAgentEvents = useMemo(() => {
+    if (!selectedAgentId || !allEvents) return [];
+    return allEvents.filter((e) => e.agent_id === selectedAgentId);
+  }, [selectedAgentId, allEvents]);
 
   return (
     <div className="space-y-4">
@@ -203,6 +241,7 @@ export function Topology() {
             fitView
             nodesDraggable={false}
             nodesConnectable={false}
+            onNodeClick={onNodeClick}
             proOptions={{ hideAttribution: true }}
           >
             <Background gap={20} />
@@ -210,6 +249,12 @@ export function Topology() {
           </ReactFlow>
         )}
       </div>
+
+      <AgentDrawer
+        agent={selectedAgent}
+        events={selectedAgentEvents}
+        onClose={() => setSelectedAgentId(null)}
+      />
     </div>
   );
 }

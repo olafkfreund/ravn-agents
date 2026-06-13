@@ -2424,6 +2424,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "k8s-openapi",
+ "kube",
  "nix",
  "ravn-core",
  "ravn-crypto",

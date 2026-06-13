@@ -136,3 +136,56 @@ body {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ── Heartbeat & EKG Animations ──────────────────────────────────────────── */
+@keyframes ekg-sweep {
+  0% {
+    stroke-dashoffset: 145;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes ekg-pulse-bg {
+  0%, 100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.animate-ekg-pulse {
+  stroke-dasharray: 35 110;
+  stroke-dashoffset: 145;
+  animation: ekg-sweep 2s linear infinite;
+}
+
+.animate-ekg-bg {
+  animation: ekg-pulse-bg 4s ease-in-out infinite;
+}
+
+@keyframes radar-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  70% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+.animate-radar {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background-color: rgb(var(--sev-notice));
+  animation: radar-pulse 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+

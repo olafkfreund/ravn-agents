@@ -468,6 +468,7 @@ pub struct TopologyNode {
     pub status: String,
     /// Worst severity among the agent's recent events (last 24h), if any.
     pub severity: Option<String>,
+    pub labels: BTreeMap<String, String>,
 }
 
 fn severity_from_rank(rank: i32) -> &'static str {
@@ -522,6 +523,7 @@ pub async fn topology(pool: &PgPool, group_by: Option<&str>) -> anyhow::Result<T
             host: a.host.clone(),
             status: a.status.clone(),
             severity: worst.get(&a.agent_id).cloned(),
+            labels: a.labels.clone(),
         });
     }
 

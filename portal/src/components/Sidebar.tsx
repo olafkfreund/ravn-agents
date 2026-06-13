@@ -12,6 +12,7 @@ const NAV: NavItem[] = [
   { to: "/agents", label: "Agents", glyph: "❖" },
   { to: "/topology", label: "Topology", glyph: "⬡" },
   { to: "/remediations", label: "Remediations", glyph: "⟳" },
+  { to: "/settings", label: "Settings", glyph: "⚙" },
 ];
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -102,7 +103,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <span className="w-4 text-center text-fg-mute">↗</span>
             <span>GitHub</span>
           </a>
-          <p className="px-3 pt-2 font-mono text-[10px] text-fg-mute">v0.0.0 · M0</p>
+          <p className="px-3 pt-2 font-mono text-[10px] text-fg-mute">v0.1.0-dev · M1</p>
         </div>
       </aside>
     </>

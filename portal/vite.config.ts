@@ -11,6 +11,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5318,
+    watch: {
+      usePolling: true,
+    },
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
       "/health": { target: apiTarget, changeOrigin: true },

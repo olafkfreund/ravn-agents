@@ -10,6 +10,14 @@
 //! The LLM is not involved here in P1: matching is deterministic and the
 //! rationale is templated. Durable Postgres audit of [`RemediationRecord`] is a
 //! follow-up; P1 keeps the records in memory (mirroring the command queue).
+//!
+//! # Condition path validation (#151)
+//!
+//! Template `match.conditions` and `parameters[*].from` are dotted paths into a
+//! serialized [`Event`]. Both are validated at load time against the set of paths
+//! that the typed accessor [`event_field`] recognises. An unknown path causes
+//! [`TemplateRegistry::load_dir`] to return an error, aborting server startup
+//! with a clear message instead of silently never matching.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,13 +25,184 @@ use std::sync::Mutex;
 
 use chrono::{Duration, Utc};
 use ravn_core::{
-    ActionResult, ApprovalRef, CommandEnvelope, Decision, Event, RemediationProposal,
+    ActionResult, ApprovalRef, CommandEnvelope, Decision, Event, Payload, RemediationProposal,
     RemediationRecord, Template,
 };
 use uuid::Uuid;
 
 use crate::command::CommandSigner;
 use crate::policy::PolicyDecision;
+
+// ---------------------------------------------------------------------------
+// Typed field accessor (#151)
+// ---------------------------------------------------------------------------
+
+/// Walk a dotted path (e.g. `payload.unit`) through an [`Event`] and return
+/// the string value at that leaf, without serialising the whole event to JSON.
+///
+/// Returns `None` when:
+/// - the path is structurally valid but the field is absent for this payload
+///   variant (e.g. `payload.unit` on a `ConfigDrift` event), or
+/// - the path is not a recognised event field.
+///
+/// Use [`validate_event_path`] at load time to distinguish the two cases.
+pub fn event_field<'e>(event: &'e Event, path: &str) -> Option<&'e str> {
+    match path {
+        "host" => Some(event.host.as_str()),
+        "title" => Some(event.title.as_str()),
+        "severity" => Some(severity_str(event.severity)),
+        // payload.*
+        "payload.kind" => Some(payload_kind_str(&event.payload)),
+        "payload.unit" => match &event.payload {
+            Payload::FailedUnit(p) => Some(p.unit.as_str()),
+            Payload::Journald(p) => p.unit.as_deref(),
+            _ => None,
+        },
+        "payload.result" => match &event.payload {
+            Payload::FailedUnit(p) => Some(p.result.as_str()),
+            _ => None,
+        },
+        "payload.message" => match &event.payload {
+            Payload::Journald(p) => Some(p.message.as_str()),
+            Payload::KubeWorkload(p) => p.message.as_deref(),
+            Payload::KubeNode(p) => p.message.as_deref(),
+            _ => None,
+        },
+        "payload.path" => match &event.payload {
+            Payload::ConfigDrift(p) => Some(p.path.as_str()),
+            _ => None,
+        },
+        "payload.new_hash" => match &event.payload {
+            Payload::ConfigDrift(p) => Some(p.new_hash.as_str()),
+            _ => None,
+        },
+        "payload.old_hash" => match &event.payload {
+            Payload::ConfigDrift(p) => p.old_hash.as_deref(),
+            _ => None,
+        },
+        "payload.diff" => match &event.payload {
+            Payload::ConfigDrift(p) => p.diff.as_deref(),
+            _ => None,
+        },
+        "payload.action" => match &event.payload {
+            Payload::Auth(p) => Some(p.action.as_str()),
+            _ => None,
+        },
+        "payload.user" => match &event.payload {
+            Payload::Auth(p) => p.user.as_deref(),
+            _ => None,
+        },
+        "payload.remote_addr" => match &event.payload {
+            Payload::Auth(p) => p.remote_addr.as_deref(),
+            _ => None,
+        },
+        "payload.mechanism" => match &event.payload {
+            Payload::Update(p) => Some(p.mechanism.as_str()),
+            _ => None,
+        },
+        "payload.from" => match &event.payload {
+            Payload::Update(p) => p.from.as_deref(),
+            _ => None,
+        },
+        "payload.to" => match &event.payload {
+            Payload::Update(p) => p.to.as_deref(),
+            _ => None,
+        },
+        "payload.namespace" => match &event.payload {
+            Payload::KubeWorkload(p) => Some(p.namespace.as_str()),
+            _ => None,
+        },
+        "payload.name" => match &event.payload {
+            Payload::KubeWorkload(p) => Some(p.name.as_str()),
+            _ => None,
+        },
+        "payload.object_kind" => match &event.payload {
+            Payload::KubeWorkload(p) => Some(p.object_kind.as_str()),
+            _ => None,
+        },
+        "payload.reason" => match &event.payload {
+            Payload::KubeWorkload(p) => Some(p.reason.as_str()),
+            _ => None,
+        },
+        "payload.container" => match &event.payload {
+            Payload::KubeWorkload(p) => p.container.as_deref(),
+            _ => None,
+        },
+        "payload.node" => match &event.payload {
+            Payload::KubeNode(p) => Some(p.node.as_str()),
+            _ => None,
+        },
+        "payload.condition" => match &event.payload {
+            Payload::KubeNode(p) => Some(p.condition.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Returns `true` if `path` is a recognised dotted path into [`Event`].
+///
+/// This is distinct from `event_field` returning `Some` at runtime: a path may
+/// be structurally valid yet resolve to `None` for a particular payload variant
+/// (e.g. `payload.unit` is valid for `failed_unit` events but absent on
+/// `config_drift`). Validation at load time checks structure only; at runtime
+/// `None` means the condition simply does not match.
+pub fn validate_event_path(path: &str) -> bool {
+    matches!(
+        path,
+        "host"
+            | "title"
+            | "severity"
+            | "payload.kind"
+            | "payload.unit"
+            | "payload.result"
+            | "payload.message"
+            | "payload.path"
+            | "payload.new_hash"
+            | "payload.old_hash"
+            | "payload.diff"
+            | "payload.action"
+            | "payload.user"
+            | "payload.remote_addr"
+            | "payload.mechanism"
+            | "payload.from"
+            | "payload.to"
+            | "payload.namespace"
+            | "payload.name"
+            | "payload.object_kind"
+            | "payload.reason"
+            | "payload.container"
+            | "payload.node"
+            | "payload.condition"
+    )
+}
+
+fn severity_str(s: ravn_core::Severity) -> &'static str {
+    use ravn_core::Severity::*;
+    match s {
+        Info => "info",
+        Notice => "notice",
+        Warning => "warning",
+        Error => "error",
+        Critical => "critical",
+    }
+}
+
+fn payload_kind_str(p: &Payload) -> &'static str {
+    match p {
+        Payload::Journald(_) => "journald",
+        Payload::FailedUnit(_) => "failed_unit",
+        Payload::ConfigDrift(_) => "config_drift",
+        Payload::Auth(_) => "auth",
+        Payload::Update(_) => "update",
+        Payload::KubeWorkload(_) => "kube_workload",
+        Payload::KubeNode(_) => "kube_node",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Template registry
+// ---------------------------------------------------------------------------
 
 /// Curated templates loaded from a directory at startup.
 #[derive(Default)]
@@ -32,8 +211,20 @@ pub struct TemplateRegistry {
 }
 
 impl TemplateRegistry {
-    /// Load and validate every `*.toml` template under `dir`. A missing directory
-    /// yields an empty registry (remediation simply produces no proposals).
+    /// Load and validate every `*.toml` template under `dir`. A missing
+    /// directory yields an empty registry (remediation simply produces no
+    /// proposals).
+    ///
+    /// # Startup validation (#151)
+    ///
+    /// Beyond the structural [`Template::validate`] already performed, this
+    /// method additionally verifies that:
+    ///
+    /// - every `match.conditions` key is a recognised dotted [`Event`] path
+    /// - every `parameters[*].from` value is a recognised dotted [`Event`] path
+    ///
+    /// An unrecognised path returns an `Err`, aborting server startup with a
+    /// clear message rather than letting the template silently never match.
     pub fn load_dir(dir: &Path) -> anyhow::Result<Self> {
         let mut templates = Vec::new();
         let entries = match std::fs::read_dir(dir) {
@@ -55,17 +246,51 @@ impl TemplateRegistry {
             template
                 .validate()
                 .map_err(|e| anyhow::anyhow!("invalid template {}: {e}", path.display()))?;
+            // (#151) Validate condition paths against the event schema.
+            validate_template_paths(&template)
+                .map_err(|e| anyhow::anyhow!("invalid template {}: {e}", path.display()))?;
             templates.push(template);
         }
         tracing::info!(count = templates.len(), dir = %dir.display(), "loaded remediation templates");
         Ok(Self { templates })
     }
 
-    /// The first template whose match source equals the event's source.
-    /// (Richer `conditions` matching is part of the policy work, #116.)
+    /// The first template whose `match.source` equals the event's source AND
+    /// whose `match.conditions` all hold against the event.
+    ///
+    /// Logs at `debug` level when a template's source matches but one of its
+    /// conditions does not, naming the failing path and the expected value —
+    /// this makes near-miss failures observable without adding noise to the
+    /// normal ingestion path (#151).
     pub fn match_event(&self, event: &Event) -> Option<&Template> {
         let source = event.source();
-        self.templates.iter().find(|t| t.match_.source == source)
+        for template in &self.templates {
+            if template.match_.source != source {
+                continue;
+            }
+            // Check every condition in the template.
+            let mut all_match = true;
+            for (path, expected) in &template.match_.conditions {
+                let actual = event_field(event, path.as_str());
+                if actual != Some(expected.as_str()) {
+                    tracing::debug!(
+                        template = %template.id,
+                        condition_path = %path,
+                        expected = %expected,
+                        actual = ?actual,
+                        event_id = %event.id,
+                        host = %event.host,
+                        "event matched template source but failed condition"
+                    );
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                return Some(template);
+            }
+        }
+        None
     }
 
     /// Look a template up by id.
@@ -74,21 +299,56 @@ impl TemplateRegistry {
     }
 }
 
-/// Resolve a template's declared parameters against an event by navigating the
-/// dotted `from` path (e.g. `payload.unit`) through the event's JSON form.
+/// Validate that every dotted path referenced in a template's conditions and
+/// parameters is recognised by [`validate_event_path`]. Returns an error
+/// naming the first bad path.
+fn validate_template_paths(template: &Template) -> anyhow::Result<()> {
+    for path in template.match_.conditions.keys() {
+        if !validate_event_path(path.as_str()) {
+            anyhow::bail!(
+                "template '{}': condition path '{}' is not a recognised event field; \
+                 valid paths: host, title, severity, payload.kind, payload.unit, \
+                 payload.result, payload.message, payload.path, payload.new_hash, \
+                 payload.old_hash, payload.diff, payload.action, payload.user, \
+                 payload.remote_addr, payload.mechanism, payload.from, payload.to, \
+                 payload.namespace, payload.name, payload.object_kind, payload.reason, \
+                 payload.container, payload.node, payload.condition",
+                template.id,
+                path
+            );
+        }
+    }
+    for (param_name, spec) in &template.parameters {
+        if !validate_event_path(spec.from.as_str()) {
+            anyhow::bail!(
+                "template '{}': parameter '{}' has unrecognised from-path '{}'; \
+                 valid paths: host, title, severity, payload.kind, payload.unit, \
+                 payload.result, payload.message, payload.path, payload.new_hash, \
+                 payload.old_hash, payload.diff, payload.action, payload.user, \
+                 payload.remote_addr, payload.mechanism, payload.from, payload.to, \
+                 payload.namespace, payload.name, payload.object_kind, payload.reason, \
+                 payload.container, payload.node, payload.condition",
+                template.id,
+                param_name,
+                spec.from
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Parameter resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a template's declared parameters against an event using the typed
+/// [`event_field`] accessor. This avoids the JSON roundtrip that the previous
+/// implementation used (#151) while keeping the same dotted-path API.
 pub fn resolve_params(template: &Template, event: &Event) -> anyhow::Result<BTreeMap<String, String>> {
-    let event_json = serde_json::to_value(event)?;
     let mut params = BTreeMap::new();
     for (name, spec) in &template.parameters {
-        let mut cur = &event_json;
-        for segment in spec.from.split('.') {
-            cur = cur
-                .get(segment)
-                .ok_or_else(|| anyhow::anyhow!("parameter {name}: no field at {}", spec.from))?;
-        }
-        let value = cur
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("parameter {name}: {} is not a string", spec.from))?;
+        let value = event_field(event, spec.from.as_str())
+            .ok_or_else(|| anyhow::anyhow!("parameter {name}: no string value at '{}'", spec.from))?;
         params.insert(name.clone(), value.to_string());
     }
     Ok(params)
@@ -568,5 +828,175 @@ mod tests {
         assert!(store.reject(id, "olaf".into(), Some("not now".into())));
         let rec = store.list().into_iter().next().unwrap();
         assert!(matches!(rec.decision, Decision::Rejected { .. }));
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #151: typed path resolution + startup validation
+    // ------------------------------------------------------------------
+
+    /// A template with an unrecognised condition path must fail load_dir, not
+    /// silently load and never match.
+    #[test]
+    fn load_dir_rejects_bad_condition_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_toml = r#"
+            id = "bad-cond"
+            version = 1
+            title = "bad"
+            risk_tier = "safe"
+            [match]
+            source = "failed_unit"
+            conditions = { active_state = "failed" }
+            [[steps]]
+            capability = "restart_unit"
+            unit = "x.service"
+        "#;
+        std::fs::write(dir.path().join("bad.toml"), bad_toml).unwrap();
+        let result = TemplateRegistry::load_dir(dir.path()).map(|_| ());
+        assert!(result.is_err(), "expected load_dir to fail with bad condition path");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("active_state"),
+            "error message should name the bad path, got: {msg}"
+        );
+        assert!(
+            msg.contains("bad.toml") || msg.contains("bad-cond"),
+            "error should name the template or file, got: {msg}"
+        );
+    }
+
+    /// A template with an unrecognised parameter `from` path must fail load_dir.
+    #[test]
+    fn load_dir_rejects_bad_parameter_from_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_toml = r#"
+            id = "bad-param"
+            version = 1
+            title = "bad"
+            risk_tier = "safe"
+            [match]
+            source = "failed_unit"
+            [parameters]
+            unit = { type = "string", from = "payload.typo_unit" }
+            [[steps]]
+            capability = "restart_unit"
+            unit = "{{unit}}"
+        "#;
+        std::fs::write(dir.path().join("bad.toml"), bad_toml).unwrap();
+        let result = TemplateRegistry::load_dir(dir.path()).map(|_| ());
+        assert!(result.is_err(), "expected load_dir to fail with bad parameter from-path");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("payload.typo_unit"),
+            "error message should name the bad path, got: {msg}"
+        );
+    }
+
+    /// `match_event` must return `None` when the source matches but a condition
+    /// fails (i.e. the field value does not equal the expected value).
+    #[test]
+    fn match_event_skips_template_when_condition_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // Template requires payload.result = "timeout", but the event has "exit-code".
+        let toml_src = r#"
+            id = "timeout-only"
+            version = 1
+            title = "timeout only"
+            risk_tier = "safe"
+            [match]
+            source = "failed_unit"
+            conditions = { "payload.result" = "timeout" }
+            [parameters]
+            unit = { type = "string", from = "payload.unit" }
+            [[steps]]
+            capability = "restart_unit"
+            unit = "{{unit}}"
+        "#;
+        std::fs::write(dir.path().join("t.toml"), toml_src).unwrap();
+        let reg = TemplateRegistry::load_dir(dir.path()).expect("valid template");
+        // Event has result = "exit-code", not "timeout".
+        let event = failed_unit_event("nginx.service");
+        assert!(
+            reg.match_event(&event).is_none(),
+            "should not match when condition value differs"
+        );
+    }
+
+    /// `match_event` returns the template when source AND all conditions match.
+    #[test]
+    fn match_event_returns_template_when_all_conditions_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_src = r#"
+            id = "exit-code-only"
+            version = 1
+            title = "exit-code only"
+            risk_tier = "safe"
+            [match]
+            source = "failed_unit"
+            conditions = { "payload.result" = "exit-code" }
+            [parameters]
+            unit = { type = "string", from = "payload.unit" }
+            [[steps]]
+            capability = "restart_unit"
+            unit = "{{unit}}"
+        "#;
+        std::fs::write(dir.path().join("t.toml"), toml_src).unwrap();
+        let reg = TemplateRegistry::load_dir(dir.path()).expect("valid template");
+        let event = failed_unit_event("nginx.service"); // result = "exit-code"
+        let tpl = reg.match_event(&event).expect("should match");
+        assert_eq!(tpl.id, "exit-code-only");
+    }
+
+    /// The typed accessor must return the right string for common paths.
+    #[test]
+    fn event_field_returns_typed_values() {
+        let event = failed_unit_event("nginx.service");
+        assert_eq!(event_field(&event, "host"), Some("host-1"));
+        assert_eq!(event_field(&event, "severity"), Some("error"));
+        assert_eq!(event_field(&event, "payload.kind"), Some("failed_unit"));
+        assert_eq!(event_field(&event, "payload.unit"), Some("nginx.service"));
+        assert_eq!(event_field(&event, "payload.result"), Some("exit-code"));
+        // Wrong payload variant → None, not a panic.
+        assert_eq!(event_field(&event, "payload.path"), None);
+        // Completely unknown path → None.
+        assert_eq!(event_field(&event, "nonexistent.field"), None);
+    }
+
+    /// `validate_event_path` accepts recognised paths and rejects unknown ones.
+    #[test]
+    fn validate_event_path_accepts_known_and_rejects_unknown() {
+        assert!(validate_event_path("host"));
+        assert!(validate_event_path("payload.unit"));
+        assert!(validate_event_path("payload.condition"));
+        assert!(!validate_event_path("active_state"));
+        assert!(!validate_event_path("payload.typo_unit"));
+        assert!(!validate_event_path(""));
+    }
+
+    /// `resolve_params` uses the typed accessor and resolves correctly.
+    #[test]
+    fn resolve_params_uses_typed_accessor() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_src = r#"
+            id = "typed-params"
+            version = 1
+            title = "typed"
+            risk_tier = "safe"
+            [match]
+            source = "failed_unit"
+            [parameters]
+            unit = { type = "string", from = "payload.unit" }
+            host = { type = "string", from = "host" }
+            [[steps]]
+            capability = "restart_unit"
+            unit = "{{unit}}"
+        "#;
+        std::fs::write(dir.path().join("t.toml"), toml_src).unwrap();
+        let reg = TemplateRegistry::load_dir(dir.path()).expect("valid template");
+        let event = failed_unit_event("sshd.service");
+        let tpl = reg.match_event(&event).expect("match");
+        let params = resolve_params(tpl, &event).expect("resolve");
+        assert_eq!(params["unit"], "sshd.service");
+        assert_eq!(params["host"], "host-1");
     }
 }

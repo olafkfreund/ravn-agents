@@ -1,0 +1,208 @@
+# Air-gapped Ravn deployment — Docker Compose profile (issue #153).
+#
+# This profile is the container equivalent of the NixOS air-gapped example.
+# It provably works with outbound networking disabled:
+#
+#   docker network create --internal ravn-airgap
+#   docker compose -f docker-compose.airgapped.yml up
+#
+# PREREQUISITES
+# -------------
+# 1. All images must already be present in the local Docker image store
+#    (no pulls happen at runtime because the internal network has no gateway):
+#
+#     # On a build host with internet access:
+#     docker pull postgres:17-alpine
+#     docker pull nats:2-alpine
+#     docker compose -f docker-compose.airgapped.yml build
+#
+#     # Export to a tar bundle:
+#     docker save postgres:17-alpine nats:2-alpine \
+#         ravn-server:airgap ravn-agent:airgap \
+#         | gzip > ravn-airgap-images.tar.gz
+#
+#     # Transfer bundle to the air-gapped host and load:
+#     docker load < ravn-airgap-images.tar.gz
+#
+# 2. The GGUF model must be in ./models/ before starting the agent:
+#
+#     mkdir -p models
+#     cp /path/to/qwen3-1.7b-q4_k_m.gguf models/
+#
+# 3. Secrets must be in ./secrets/ (see the air-gapped install doc):
+#
+#     mkdir -p secrets
+#     # Generate CA and bootstrap token per the install doc, then:
+#     cp ca.crt ca.key bootstrap-token secrets/
+#
+# VERIFYING NETWORK ISOLATION
+# ----------------------------
+#   docker compose -f docker-compose.airgapped.yml exec control-plane \
+#       curl -m 5 https://example.com   # should time out / refuse
+#
+# The `internal: true` flag on the network means Docker never assigns a
+# default gateway to containers, so they cannot reach the internet even if
+# the host can.
+
+networks:
+  ravn-airgap:
+    # No external gateway — containers cannot reach the internet.
+    internal: true
+
+services:
+  # ── infrastructure ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    networks: [ravn-airgap]
+    environment:
+      POSTGRES_USER: ravn
+      POSTGRES_PASSWORD: ravn
+      POSTGRES_DB: ravn
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ravn"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # No ports exposed to the host — internal traffic only.
+
+  nats:
+    image: nats:2-alpine
+    networks: [ravn-airgap]
+    command: ["--jetstream"]
+    # No ports exposed to the host.
+
+  # ── control plane ────────────────────────────────────────────────────────
+  control-plane:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ravn-server:airgap
+    networks: [ravn-airgap]
+    command: ["ravn-server"]
+    environment:
+      RAVN_BIND: 0.0.0.0:8080
+      DATABASE_URL: postgres://ravn:ravn@postgres:5432/ravn
+      NATS_URL: nats://nats:4222
+      RUST_LOG: info
+
+      # Air-gapped mode: blocks any JWKS URL fetch at startup.
+      # The server will refuse to start if RAVN_OIDC_JWKS_URL or
+      # RAVN_INGEST_OIDC_JWKS_URL are set instead of their _FILE equivalents.
+      RAVN_AIRGAPPED: "1"
+
+      # Enrollment CA (cert is public; key is mounted read-only from secrets/).
+      RAVN_CA_CERT: /secrets/ca.crt
+      RAVN_CA_KEY: /secrets/ca.key
+      RAVN_ENROLL_TOKEN_FILE: /secrets/bootstrap-token
+      RAVN_CERT_TTL_DAYS: "365"
+
+      # Remediation templates from the embedded store path (no network needed).
+      RAVN_TEMPLATES_DIR: /app/templates
+
+      # No OIDC configured by default — use bearer tokens for the portal.
+      # To enable OIDC with an internal IdP, add:
+      #   RAVN_OIDC_ISSUER: "https://idp.internal.example.com/realms/ravn"
+      #   RAVN_OIDC_JWKS_FILE: /secrets/oidc-jwks.json   # NOT a URL
+      #   RAVN_OIDC_AUDIENCE: "ravn-portal"
+
+    volumes:
+      - ../secrets:/secrets:ro
+      - ../templates:/app/templates:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    ports:
+      # Expose the control-plane API on an uncommon host port for the portal
+      # and agent enrollment.  In a real air-gapped deployment this would be
+      # the internal network address, not localhost.
+      - "18090:8080"
+
+  # ── agent ────────────────────────────────────────────────────────────────
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ravn-agent:airgap
+    networks: [ravn-airgap]
+    command: ["ravnd"]
+    environment:
+      RAVN_SERVER_URL: nats://nats:4222
+      RAVN_HOST: airgap-agent
+      RUST_LOG: info
+
+      # Detection — taps that do not need a real systemd host.
+      RAVN_JOURNALD: "0"
+      RAVN_AUTH: "0"
+      RAVN_FAILED_UNITS: "0"
+      RAVN_UPDATES: "0"
+      RAVN_CONFIG_DRIFT_PATHS: /watch
+
+      # Local inference via the internal llama-server sidecar.
+      RAVN_INFERENCE: "1"
+      RAVN_INFERENCE_ENDPOINT: http://llama:18181
+      RAVN_INFERENCE_MODEL: qwen3-1.7b-q4_k_m
+
+      # Enrollment: contacts the control-plane over the internal network.
+      RAVN_ENROLL_ENDPOINT: http://control-plane:8080
+      RAVN_ENROLL_TOKEN_FILE: /secrets/bootstrap-token
+
+    volumes:
+      - ../docker/watch:/watch:ro
+      - ../secrets:/secrets:ro
+    depends_on:
+      - nats
+      - control-plane
+      - llama
+
+  # ── local inference sidecar ──────────────────────────────────────────────
+  #
+  # llama-server serves the GGUF model on the internal network.
+  # The image is built from the Ravn repo (contains llama.cpp binaries) so no
+  # external registry pull is needed at runtime.
+  #
+  # The model file must be present at ./models/qwen3-1.7b-q4_k_m.gguf before
+  # starting this stack (see PREREQUISITES above).
+  llama:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ravn-agent:airgap   # reuse the agent image; it ships llama-server
+    networks: [ravn-airgap]
+    command:
+      - llama-server
+      - --model
+      - /models/qwen3-1.7b-q4_k_m.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18181"
+      - --ctx-size
+      - "4096"
+      - --metrics
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:18181/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # No host ports — internal traffic only.
+
+  # ── portal ───────────────────────────────────────────────────────────────
+  portal:
+    build:
+      context: ..
+      dockerfile: docker/portal.Dockerfile
+    networks: [ravn-airgap]
+    ports:
+      - "8088:80"
+    depends_on:
+      - control-plane
+
+volumes:
+  pgdata:

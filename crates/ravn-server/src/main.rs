@@ -32,6 +32,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     init_tracing(&config);
 
+    if config::is_airgapped() {
+        tracing::info!(
+            "RAVN_AIRGAPPED=1 — air-gapped mode active: \
+             all JWKS documents must be local files; outbound JWKS URL fetches are blocked"
+        );
+    }
+
     // Database: connect and migrate before serving.
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
@@ -250,7 +257,20 @@ async fn build_user_auth(cfg: &OidcConfig) -> anyhow::Result<UserAuth> {
 }
 
 /// Load a JWKS document from a URL (fetched at startup) or a local file.
+///
+/// When `RAVN_AIRGAPPED=1` is set the URL variant is rejected at startup rather
+/// than silently making an outbound HTTPS call — the operator must supply the
+/// JWKS as a local file (`RAVN_OIDC_JWKS_FILE` / `RAVN_INGEST_OIDC_JWKS_FILE`).
 async fn load_jwks(source: &JwksSource) -> anyhow::Result<String> {
+    if crate::config::is_airgapped() {
+        if let JwksSource::Url(url) = source {
+            anyhow::bail!(
+                "RAVN_AIRGAPPED=1 is set but JWKS source is a URL ({url}). \
+                 In air-gapped mode all JWKS documents must be provided as local \
+                 files (RAVN_OIDC_JWKS_FILE / RAVN_INGEST_OIDC_JWKS_FILE)."
+            );
+        }
+    }
     match source {
         JwksSource::Url(url) => reqwest::get(url)
             .await

@@ -403,3 +403,15 @@ impl Config {
         }
     }
 }
+
+/// Returns `true` when `RAVN_AIRGAPPED=1` (or `true`/`yes`/`on`) is set.
+///
+/// In air-gapped mode the server refuses to make any outbound network calls
+/// on startup (e.g. JWKS URL fetches).  All external documents must be
+/// supplied as local files or already-mounted credentials.
+pub fn is_airgapped() -> bool {
+    matches!(
+        std::env::var("RAVN_AIRGAPPED").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}

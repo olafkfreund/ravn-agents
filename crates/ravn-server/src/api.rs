@@ -337,8 +337,8 @@ async fn post_command_result(
     Json(result): Json<ravn_core::ActionResult>,
 ) -> StatusCode {
     tracing::info!(command_id = %result.command_id, status = ?result.status, "command result reported");
-    // Close the matching remediation record (#115), and keep the raw result.
-    if let Some((record, signature)) = state.remediations.record_result(result.clone()) {
+    // Close the matching remediation record (#115), persist to Postgres (#143).
+    if let Some((record, signature)) = state.remediations.record_result(result.clone()).await {
         // Reflect the outcome into the knowledge base (#118): create or update
         // the per-fault entry so future occurrences recall this resolution.
         if state.knowledge.is_enabled() && !signature.is_empty() {
@@ -367,19 +367,20 @@ async fn post_command_result(
 }
 
 /// List remediation records — pending proposals plus decided/executed history
-/// (#115). Drives the portal approval queue (#119).
+/// (#115). Drives the portal approval queue (#119). Reads from Postgres (#143).
 async fn list_remediations(State(state): State<AppState>) -> Json<Vec<ravn_core::RemediationRecord>> {
-    Json(state.remediations.list())
+    Json(state.remediations.list().await)
 }
 
 /// Approve a pending remediation (#115): sign a command for the proposal and
 /// enqueue it for the agent to pull. Mutating → requires admin (RBAC).
+/// Writes the approval to Postgres (#143).
 async fn approve_remediation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     role: Option<axum::Extension<Role>>,
 ) -> Response {
-    let Some(proposal) = state.remediations.pending_proposal(id) else {
+    let Some(proposal) = state.remediations.pending_proposal(id).await else {
         return (StatusCode::NOT_FOUND, "no pending remediation with that id").into_response();
     };
     let Some(template) = state.templates.get(&proposal.template_id) else {
@@ -403,17 +404,21 @@ async fn approve_remediation(
     let command_id = envelope.command_id;
     let signature = envelope.sig.clone();
     state.command_queue.enqueue(envelope);
-    state.remediations.approve(
-        id,
-        ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() },
-        command_id,
-        signature,
-    );
+    state
+        .remediations
+        .approve(
+            id,
+            ravn_core::ApprovalRef::Human { user: user.to_string(), approved_at: chrono::Utc::now() },
+            command_id,
+            signature,
+        )
+        .await;
     tracing::info!(remediation = %id, %command_id, "remediation approved; command enqueued");
     Json(serde_json::json!({ "approved": true, "command_id": command_id })).into_response()
 }
 
 /// Reject a pending remediation (#115). Mutating → requires admin (RBAC).
+/// Writes the rejection to Postgres (#143).
 async fn reject_remediation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -423,7 +428,7 @@ async fn reject_remediation(
         Role::Admin => "admin",
         Role::Viewer => "viewer",
     };
-    if state.remediations.reject(id, user.to_string(), None) {
+    if state.remediations.reject(id, user.to_string(), None).await {
         Json(serde_json::json!({ "rejected": true })).into_response()
     } else {
         (StatusCode::NOT_FOUND, "no remediation with that id").into_response()

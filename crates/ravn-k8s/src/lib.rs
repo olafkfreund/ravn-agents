@@ -17,6 +17,7 @@ pub mod command_loop;
 pub mod config;
 pub mod executor;
 pub mod http;
+pub mod logs;
 pub mod mapping;
 pub mod nats;
 pub mod node;

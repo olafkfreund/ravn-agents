@@ -24,7 +24,7 @@ pub async fn run(
     namespace: Option<String>,
     agent_id: AgentId,
     host: String,
-    publisher: Publisher,
+    publisher: std::sync::Arc<Publisher>,
 ) -> anyhow::Result<()> {
     let api: Api<KubeEvent> = match &namespace {
         Some(ns) => Api::namespaced(client, ns),

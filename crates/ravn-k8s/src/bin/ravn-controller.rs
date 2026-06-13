@@ -31,7 +31,24 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("building Kubernetes client (in-cluster or kubeconfig)")?;
 
-    let publisher = Publisher::connect(&config).await?;
+    let publisher = std::sync::Arc::new(Publisher::connect(&config).await?);
+
+    let logs_client = client.clone();
+    let logs_publisher = publisher.clone();
+    let logs_config = ravn_k8s::logs::Config {
+        namespace: config.namespace.clone(),
+        ..Default::default()
+    };
+    let logs_agent_id = config.agent_id;
+    let logs_host = config.host.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            ravn_k8s::logs::run(logs_client, logs_config, logs_agent_id, logs_host, logs_publisher)
+                .await
+        {
+            tracing::warn!(%e, "k8s log scraper exited");
+        }
+    });
 
     watcher::run(client, config.namespace, config.agent_id, config.host, publisher).await
 }

@@ -4,6 +4,7 @@ import { Events } from "./pages/Events";
 import { Agents } from "./pages/Agents";
 import { Topology } from "./pages/Topology";
 import { Remediations } from "./pages/Remediations";
+import { Settings } from "./pages/Settings";
 
 export function App() {
   return (
@@ -14,6 +15,7 @@ export function App() {
         <Route path="/agents" element={<Agents />} />
         <Route path="/topology" element={<Topology />} />
         <Route path="/remediations" element={<Remediations />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/events" replace />} />
       </Route>
     </Routes>

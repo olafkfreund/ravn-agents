@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation, Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { SystemHealthBanner } from "./SystemHealthBanner";
+import { useEventStream } from "../lib/useEventStream";
 
 const TITLES: Record<string, string> = {
   "/events": "Events",
@@ -14,6 +15,36 @@ export function Layout() {
   const [navOpen, setNavOpen] = useState(false);
   const { pathname } = useLocation();
   const title = TITLES[pathname] ?? "Ravn";
+
+  // Subscribe to live events for global desktop notifications
+  const liveEvents = useEventStream(true);
+  const [lastNotifiedId, setLastNotifiedId] = useState<string | null>(null);
+
+  // Request notification permissions on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  }, []);
+
+  // Show desktop notification when a critical, error, or warning event arrives
+  useEffect(() => {
+    if (liveEvents.length === 0) return;
+    const latest = liveEvents[0];
+    if (latest.id === lastNotifiedId) return;
+    setLastNotifiedId(latest.id);
+
+    const severity = (latest.severity || "").toLowerCase();
+    if (severity === "critical" || severity === "error" || severity === "warning") {
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        new Notification(`Ravn Alert [${severity.toUpperCase()}]: ${latest.host}`, {
+          body: latest.title || "A system alert has been detected.",
+        });
+      }
+    }
+  }, [liveEvents, lastNotifiedId]);
 
   return (
     <div className="flex h-full">

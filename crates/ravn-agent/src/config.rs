@@ -35,6 +35,10 @@ pub struct Config {
     pub config_drift_paths: Vec<PathBuf>,
     /// Whether the failed-unit D-Bus tap (#10) is enabled.
     pub failed_units_enable: bool,
+    /// Grace period (seconds) a unit must stay `failed` before the tap emits an
+    /// event — suppresses brief blips that systemd's own `Restart=` or a planned
+    /// restart recovers. Zero emits on first observation.
+    pub failed_units_grace_secs: u64,
     /// Watch the per-user systemd manager instead of the system one.
     pub systemd_user_bus: bool,
     /// Whether the update/NixOS-generation tap (#13) is enabled.
@@ -155,6 +159,7 @@ struct FileConfigDrift {
 #[derive(Debug, Default, Deserialize)]
 struct FileFailedUnits {
     enable: Option<bool>,
+    grace_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -229,6 +234,13 @@ impl Config {
             .or(file.detection.failed_units.enable)
             .unwrap_or(true);
 
+        // Default 15s: long enough to swallow brief blips that systemd's own
+        // Restart= recovers, short enough that a real outage is still prompt.
+        let failed_units_grace_secs = env_var("RAVN_FAILED_UNITS_GRACE_SECS")
+            .and_then(|v| v.parse().ok())
+            .or(file.detection.failed_units.grace_secs)
+            .unwrap_or(15);
+
         let systemd_user_bus = env_bool("RAVN_SYSTEMD_USER_BUS").unwrap_or(false);
 
         let updates_enable = env_bool("RAVN_UPDATES")
@@ -293,6 +305,7 @@ impl Config {
             auth_enable,
             config_drift_paths,
             failed_units_enable,
+            failed_units_grace_secs,
             systemd_user_bus,
             updates_enable,
             nix_profile,

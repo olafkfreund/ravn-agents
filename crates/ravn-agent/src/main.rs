@@ -255,6 +255,7 @@ async fn run_detection(
             host: config.host.clone(),
             user_bus: config.systemd_user_bus,
             poll_interval: std::time::Duration::from_secs(5),
+            grace: std::time::Duration::from_secs(config.failed_units_grace_secs),
         };
         let tx = tx.clone();
         tokio::spawn(async move {

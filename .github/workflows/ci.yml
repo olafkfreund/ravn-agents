@@ -17,7 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Magic Nix Cache removed: it now requires FlakeHub auth and was throttling
+      # the GH Actions cache (HTTP 418), causing flaky builds. Nix still uses
+      # cache.nixos.org via the installer.
       - name: Build, clippy, tests, NixOS toplevels, OCI images
         run: nix flake check -L
 

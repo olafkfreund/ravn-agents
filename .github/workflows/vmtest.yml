@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Magic Nix Cache removed (now needs FlakeHub auth + throttled GH cache).
       - name: Build + run the remediation VM test
         run: nix build .#remediation-e2e -L
 
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Magic Nix Cache removed (now needs FlakeHub auth + throttled GH cache).
       # The air-gapped VM test (#153):
       #   - removes the default gateway inside the VM before starting any service
       #   - sets RAVN_AIRGAPPED=1 on ravn-server

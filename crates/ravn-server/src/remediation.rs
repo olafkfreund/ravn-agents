@@ -877,6 +877,20 @@ mod tests {
         assert_eq!(tpl.match_.source, Source::FailedUnit);
     }
 
+    // Regression (#121 VM e2e): the generic failed-unit template must heal a unit
+    // that entered `failed` for ANY systemd result, not just "exit-code". A
+    // SIGKILL reports result "signal"; a too-narrow condition silently skipped it.
+    #[test]
+    fn generic_template_matches_a_signal_killed_unit() {
+        let mut event = failed_unit_event("dummy.service");
+        if let Payload::FailedUnit(p) = &mut event.payload {
+            p.result = "signal".into();
+        }
+        let reg = registry();
+        let tpl = reg.match_event(&event).expect("a signal-killed unit must still match");
+        assert_eq!(tpl.id, "failed-unit-restart");
+    }
+
     #[test]
     fn resolves_unit_param_from_payload() {
         let reg = registry();

@@ -57,6 +57,28 @@ Three planes:
 
 Full detail in [docs/architecture.md](docs/architecture.md).
 
+## Remediation templates — the "approved list"
+
+A remediation is a reviewed **TOML template** that binds a detected fault to a
+sequence of typed, whitelisted capabilities (`reset_failed`, `restart_unit`,
+`unit_state`, `nix_rollback` on hosts; `delete_pod`, `restart_deployment`,
+`pod_state` in Kubernetes — there is no arbitrary-shell capability by design).
+Each template carries a **risk tier** that controls automation: `safe` is
+eligible for policy auto-approval, `guarded` always requires a human, `dangerous`
+never auto-executes. Default is propose-and-wait; you opt specific low-risk
+templates into auto.
+
+Adding a heal for *your* service is a config change, not a code change — copy a
+pattern from the [template library](examples/remediation-templates/) (nginx
+restart, a dependency-gated app restart, a manual Postgres restart, an OOMKilled
+pod restart, a config-drift rollback) and drop it in your templates directory.
+The server validates every template at startup, so a typo fails the boot loudly
+instead of silently never matching.
+
+To cut false positives, the failed-unit tap has a **grace period** (default 15s):
+a unit must stay `failed` continuously before Ravn proposes anything, so a blip
+that systemd's own `Restart=` recovers never becomes noise.
+
 ## Roadmap
 
 What, how and when are laid out in [docs/roadmap.md](docs/roadmap.md) — including

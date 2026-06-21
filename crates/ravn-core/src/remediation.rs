@@ -654,7 +654,7 @@ mod tests {
 
         [match]
         source = "failed_unit"
-        conditions = { active_state = "failed" }
+        conditions = { "payload.result" = "exit-code" }
 
         [parameters]
         unit = { type = "string", from = "payload.unit" }
@@ -692,7 +692,10 @@ mod tests {
         assert_eq!(tpl.version, 3);
         assert_eq!(tpl.risk_tier, RiskTier::Safe);
         assert_eq!(tpl.match_.source, Source::FailedUnit);
-        assert_eq!(tpl.match_.conditions.get("active_state").map(String::as_str), Some("failed"));
+        assert_eq!(
+            tpl.match_.conditions.get("payload.result").map(String::as_str),
+            Some("exit-code")
+        );
         assert_eq!(tpl.steps.len(), 2);
         assert_eq!(tpl.verify.as_ref().unwrap().timeout_s, 30);
         assert_eq!(tpl.rollback, Rollback::None);

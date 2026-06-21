@@ -27,13 +27,20 @@
           # Rust/Cargo sources, plus data files cleanCargoSource would otherwise
           # strip (it keeps only *.rs/Cargo.*): test fixtures (#39) and the SQLx
           # migrations, which `sqlx::migrate!` embeds at build time (#24) — without
-          # them the control plane starts with no schema.
+          # them the control plane starts with no schema. The ravn-eval harness
+          # (#157) also reads a committed corpus + recordings + golden RESULTS.md
+          # at test time, so keep those too or `nix flake check` fails.
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             name = "ravn-source";
             filter = path: type:
               (pkgs.lib.hasInfix "/tests/fixtures/" path)
               || (pkgs.lib.hasInfix "/migrations/" path)
+              || (pkgs.lib.hasInfix "/ravn-eval/fixtures/" path)
+              || (pkgs.lib.hasSuffix "/ravn-eval/RESULTS.md" path)
+              # ravn-mcp's schema test (#156) validates against the committed
+              # OpenAPI doc; without it the test silently skips in the sandbox.
+              || (pkgs.lib.hasSuffix "/portal/openapi.json" path)
               || (craneLib.filterCargoSources path type);
           };
 

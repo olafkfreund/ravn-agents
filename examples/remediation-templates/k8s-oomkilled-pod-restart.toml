@@ -1,0 +1,36 @@
+# Heal an OOMKilled Kubernetes pod by deleting it so the owning controller
+# recreates it. Safe — deleting a controller-owned pod is idempotent.
+#
+# NOTE: the precondition compares `pod_state` to "OOMKilled"; the exact string
+# returned by the in-cluster executor (#146) depends on the container's waiting
+# reason at act time. If you find it skipping with PreconditionFailed, relax or
+# remove the precondition. Verify confirms the replacement reaches "Running".
+
+id = "k8s-oomkilled-pod-restart"
+version = 1
+title = "Restart an OOMKilled Kubernetes pod by deleting it"
+risk_tier = "safe"
+
+[match]
+source = "kube_workload"
+conditions = { "payload.reason" = "OOMKilled" }
+
+[parameters]
+namespace = { type = "string", from = "payload.namespace" }
+pod       = { type = "string", from = "payload.name" }
+
+[[preconditions]]
+check  = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals = "OOMKilled"
+
+[[steps]]
+capability = "delete_pod"
+namespace  = "{{namespace}}"
+pod        = "{{pod}}"
+
+[verify]
+check     = { capability = "pod_state", namespace = "{{namespace}}", pod_prefix = "{{pod}}" }
+equals    = "Running"
+timeout_s = 60
+
+rollback = "none"

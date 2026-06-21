@@ -1,0 +1,28 @@
+# Roll the host back to its previous NixOS generation when a path that should
+# NEVER change outside a controlled deploy drifts. Dangerous tier — a generation
+# rollback has wide blast radius, so this NEVER auto-executes; it only ever
+# proposes for a human to approve.
+#
+# WARNING: this fires on EVERY content change to the watched path (the
+# config_drift tap is hash-based), so point it only at paths that must not change
+# at runtime. For a host you deploy to regularly, expect (and reject) proposals
+# on each legitimate deploy — or don't use this template there.
+#
+# Requires the config_drift tap to watch this path (agent `config_drift_paths`).
+
+id = "critical-config-drift-rollback"
+version = 1
+title = "Roll back NixOS generation after unexpected config drift (manual)"
+risk_tier = "dangerous"
+
+[match]
+source = "config_drift"
+conditions = { "payload.path" = "/etc/nixos/configuration.nix" }
+
+# nix_rollback takes no parameters, so there is no [parameters] block and no
+# preconditions/verify (there is no read capability that confirms a generation
+# rollback). The action IS the remediation.
+[[steps]]
+capability = "nix_rollback"
+
+rollback = "none"

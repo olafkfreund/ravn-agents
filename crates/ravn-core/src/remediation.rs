@@ -646,6 +646,19 @@ pub struct RemediationRecord {
 mod tests {
     use super::*;
 
+    // Regression: the Postgres audit store serializes a pending proposal's
+    // `Decision` into a JSONB column and deserializes it on read. `Decision` is
+    // internally tagged, so Pending is the object `{"decision":"pending"}` — NOT
+    // a bare string. A hardcoded `'"pending"'` literal broke read-back (caught by
+    // the remediation VM e2e). This pins the wire shape and the round-trip.
+    #[test]
+    fn decision_pending_wire_shape_round_trips() {
+        let v = serde_json::to_value(Decision::Pending).unwrap();
+        assert_eq!(v, serde_json::json!({ "decision": "pending" }));
+        let back: Decision = serde_json::from_value(v).unwrap();
+        assert_eq!(back, Decision::Pending);
+    }
+
     const FAILED_UNIT_RESTART: &str = r#"
         id = "failed-unit-restart"
         version = 3

@@ -154,7 +154,6 @@ pkgs.testers.runNixOSTest {
   # ── test script ────────────────────────────────────────────────────────────
   testScript = ''
     import json
-    import subprocess
 
     machine.start()
 

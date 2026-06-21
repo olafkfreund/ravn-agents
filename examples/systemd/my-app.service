@@ -1,0 +1,38 @@
+# Example systemd unit for an app you want ravn to detect + heal.
+#
+# Key interaction with ravn: the `failed_unit` tap fires when a unit enters the
+# `failed` state. systemd's own `Restart=` can mask that — if the unit silently
+# auto-restarts forever, it may never reach `failed`, so ravn never sees it.
+#
+# The settings below let systemd self-heal *transient* blips, but after a burst
+# of rapid failures systemd gives up and the unit enters `failed` — exactly the
+# durable signal ravn should act on. Tune StartLimit* to taste:
+#   - Restart=on-failure        → restart on non-zero exit / signal, not on clean stop
+#   - RestartSec=2              → wait 2s between systemd's own retries
+#   - StartLimitIntervalSec=60  → window over which failures are counted
+#   - StartLimitBurst=4         → after 4 failures in that window, enter `failed`
+#                                 (this is where ravn takes over)
+
+[Unit]
+Description=My application
+# Declare real dependencies so the dependency-gated template's precondition is meaningful.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/my-app
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+# Reasonable hardening (mirrors the spirit of ravn's own units).
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

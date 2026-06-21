@@ -1,0 +1,35 @@
+# Restart postgresql.service on failure. Guarded tier — a database restart is
+# service-affecting, so this ALWAYS requires human approval (never auto-executes,
+# even where Safe-tier is auto-approved). Longer verify window because Postgres
+# can take a while to finish crash recovery and accept connections.
+
+id = "postgresql-restart"
+version = 1
+title = "Restart PostgreSQL on failure (manual approval)"
+risk_tier = "guarded"
+
+[match]
+source = "failed_unit"
+conditions = { "payload.unit" = "postgresql.service" }
+
+[parameters]
+unit = { type = "string", from = "payload.unit" }
+
+[[preconditions]]
+equals = "failed"
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+[[steps]]
+capability = "reset_failed"
+unit = "{{unit}}"
+
+[[steps]]
+capability = "restart_unit"
+unit = "{{unit}}"
+
+[verify]
+equals = "active"
+timeout_s = 120
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+rollback = "none"

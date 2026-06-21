@@ -1,0 +1,43 @@
+# Restart my-app.service on failure, but ONLY if its dependency is healthy.
+# Guarded tier — requires human approval. Pattern: gate a restart on a second
+# read-only precondition so you never flap-restart a service while the thing it
+# depends on is down. Swap "postgresql.service" for the real dependency, or
+# delete that precondition block if there is none.
+
+id = "my-app-restart"
+version = 2
+title = "Restart my-app.service on failure (manual approval, dependency-gated)"
+risk_tier = "guarded"
+
+[match]
+source = "failed_unit"
+conditions = { "payload.unit" = "my-app.service" }
+
+[parameters]
+unit = { type = "string", from = "payload.unit" }
+
+# Precondition 1 — the unit must genuinely be failed.
+[[preconditions]]
+equals = "failed"
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+# Precondition 2 — its dependency must be healthy. ALL preconditions must hold,
+# so if postgresql is not `active` the action is PreconditionFailed; nothing runs.
+[[preconditions]]
+equals = "active"
+check = { capability = "unit_state", unit = "postgresql.service" }
+
+[[steps]]
+capability = "reset_failed"
+unit = "{{unit}}"
+
+[[steps]]
+capability = "restart_unit"
+unit = "{{unit}}"
+
+[verify]
+equals = "active"
+timeout_s = 60
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+rollback = "none"

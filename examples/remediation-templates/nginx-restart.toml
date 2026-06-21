@@ -1,0 +1,33 @@
+# Restart nginx.service on failure. Safe tier (idempotent) — eligible for auto
+# where policy allows; otherwise it proposes and waits for approval.
+
+id = "nginx-restart"
+version = 1
+title = "Restart nginx on failure"
+risk_tier = "safe"
+
+[match]
+source = "failed_unit"
+conditions = { "payload.unit" = "nginx.service" }
+
+[parameters]
+unit = { type = "string", from = "payload.unit" }
+
+[[preconditions]]
+equals = "failed"
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+[[steps]]
+capability = "reset_failed"
+unit = "{{unit}}"
+
+[[steps]]
+capability = "restart_unit"
+unit = "{{unit}}"
+
+[verify]
+equals = "active"
+timeout_s = 30
+check = { capability = "unit_state", unit = "{{unit}}" }
+
+rollback = "none"

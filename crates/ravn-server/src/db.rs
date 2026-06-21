@@ -612,7 +612,7 @@ pub async fn insert_remediation(
         INSERT INTO remediation_records
             (proposal_id, proposal_created_at, agent_id, host, template_id,
              risk_tier, event_id, proposal, decision_state, decision_json, fault_signature)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', '"pending"', $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
         ON CONFLICT (proposal_id, proposal_created_at) DO NOTHING
         "#,
     )
@@ -624,6 +624,11 @@ pub async fn insert_remediation(
     .bind(enum_str(&proposal.risk_tier))
     .bind(proposal.event_id)
     .bind(sqlx::types::Json(proposal))
+    // Serialize the real Decision so it round-trips on read. `Decision` is
+    // internally tagged, so Pending is `{"decision":"pending"}` — NOT the bare
+    // string `"pending"` a hardcoded literal would store (which failed to
+    // deserialize on read; caught by the remediation VM e2e).
+    .bind(sqlx::types::Json(Decision::Pending))
     .bind(fault_signature)
     .execute(pool)
     .await

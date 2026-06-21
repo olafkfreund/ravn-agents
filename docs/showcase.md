@@ -115,6 +115,45 @@ design.
 
 ---
 
+## More real-life scenarios
+
+The OOMKill above is the cluster path. Here are everyday **host** ones — each is
+a TOML template you can copy from the
+[template library](https://github.com/olafkfreund/ravn-agents/tree/main/examples/remediation-templates),
+not code you write. Every action is deterministic, signed, and audited; the model
+only ever explains.
+
+> **nginx falls over (safe, can auto-heal).** A worker segfaults and
+> `nginx.service` enters `failed`. The `nginx-restart` template (`safe` tier)
+> proposes a `reset-failed` + `restart`, confirms the unit is really failed first,
+> and verifies it's `active` again within 30s. On a host where you've opted
+> `safe`-tier remediations into auto, this heals in seconds with a signed record;
+> otherwise it waits one click. **But** if nginx was only blipping and systemd's
+> own `Restart=` already brought it back, the tap's **grace period** means Ravn
+> never proposed anything — no noise.
+
+> **Postgres dies (guarded, always manual).** `postgresql.service` fails under
+> load. The `postgresql-restart` template is `guarded` — a database restart is
+> service-affecting, so it **never** auto-executes, even where `safe`-tier auto is
+> on. The operator gets a proposal with the failure explained and a 120s verify
+> window (Postgres is slow to finish crash recovery); they approve, and the heal
+> is recorded. Risk tiers are how you keep one service manual while others heal
+> themselves.
+
+> **A config that should never change, drifts (dangerous, manual).** Someone edits
+> `/etc/nixos/configuration.nix` outside the deploy pipeline. The config-drift tap
+> fires; the `critical-config-drift-rollback` template (`dangerous` tier) proposes
+> a NixOS generation rollback — and waits, because `dangerous` never auto-runs. A
+> human decides whether that drift was intended.
+
+**"Is it broken, or just deploying?"** A planned `systemctl restart` never enters
+`failed`; a rolling update or scale-down produces Kubernetes lifecycle reasons, not
+failure reasons; and every template re-checks state at execution time, so anything
+that recovered between detect and act heals nothing. Ravn infers intent from state,
+not from guesses.
+
+---
+
 ## What's shipped so far
 
 - **Agent** — host detection taps (journald, failed units, config drift, auth,
@@ -135,7 +174,9 @@ design.
   has landed ([#146](https://github.com/olafkfreund/ravn-agents/issues/146)) and the
   audit trail is now durable in Postgres
   ([#143](https://github.com/olafkfreund/ravn-agents/issues/143)) — both pending final
-  end-to-end verification (k3d / live Postgres) before release.*
+  end-to-end verification (k3d / live Postgres) before release.* Signing-key
+  rotation, a copy-paste **template library**, and a failed-unit **grace period**
+  (suppresses brief blips) round it out.
 - **One-box demo** — a NixOS host, a k3d cluster, and **GPU-accelerated** local
   explanations (AMD ROCm / NVIDIA / CPU), with a live `kill → propose → approve →
   heal` loop — `scripts/demo-up.sh`.

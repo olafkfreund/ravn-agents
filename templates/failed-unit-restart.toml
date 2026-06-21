@@ -9,10 +9,11 @@ risk_tier = "safe"
 
 [match]
 source = "failed_unit"
-# payload.result is the systemd result string reported by the D-Bus tap (#10).
-# Matching on "exit-code" limits this template to the most common failure mode;
-# remove the condition to catch all failed-unit events regardless of exit reason.
-conditions = { "payload.result" = "exit-code" }
+# No conditions: this is the generic catch-all, so it heals a unit that entered
+# `failed` for ANY reason — exit-code, signal (SIGKILL), oom-kill, timeout,
+# core-dump, etc. (Scoping to one `payload.result` like "exit-code" would silently
+# skip the others — e.g. a SIGKILL reports result "signal", not "exit-code".)
+conditions = {}
 
 [parameters]
 unit = { type = "string", from = "payload.unit" }

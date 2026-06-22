@@ -91,6 +91,35 @@ kubectl apply -f deploy/k8s/
 
 ---
 
+## GitOps Deployment (ArgoCD & FluxCD)
+
+Declarative templates for deploying Ravn via GitOps tools are provided under `deploy/k8s/gitops/`. These pull the Helm chart directly from the source repository.
+
+### ArgoCD Setup
+Apply the example Application manifest:
+```sh
+kubectl apply -f deploy/k8s/gitops/argocd-application.yaml
+```
+
+### FluxCD Setup
+Apply the example GitRepository and HelmRelease manifests:
+```sh
+kubectl apply -f deploy/k8s/gitops/flux-helmrelease.yaml
+```
+
+---
+
+## Local Development Database Seeding
+
+To quickly populate the local PostgreSQL database with mock SRE agents, event logs, and historical/pending remediations for dashboard testing:
+1. Ensure your devenv background services are running: `devenv up`
+2. Run the following command in your development shell:
+```sh
+db-seed
+```
+
+---
+
 ## Security posture
 
 - **Read-only RBAC** — `get/list/watch` on `events`/`pods`/`namespaces`

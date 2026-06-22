@@ -101,6 +101,16 @@
     echo
     kubectl get pods -n ravn-test -o wide
   '';
+  scripts.db-seed.exec = ''
+    set -euo pipefail
+    if ! pg_isready -h "$PGHOST" -p "$PGPORT" >/dev/null 2>&1; then
+      echo "PostgreSQL is not running! Please start background services with 'devenv up' first."
+      exit 1
+    fi
+    echo "Seeding Postgres database 'ravn' from scripts/seed.sql..."
+    psql -d ravn -f "$DEVENV_ROOT/scripts/seed.sql"
+    echo "Postgres database seeded successfully!"
+  '';
 
   enterShell = ''
     # devenv runs Postgres on a unix socket in $PGHOST; derive DATABASE_URL
@@ -110,6 +120,7 @@
     echo "  devenv up      → start Postgres (socket) + NATS (:14222)"
     echo "  cargo build    → build the workspace"
     echo "  k3d-up         → create the k3d test cluster + 2 pods (API :16443)"
+    echo "  db-seed        → seed Postgres with mock events & remediations for testing"
     echo "  k3d-status     → nodes + test pods   |   k3d-down → delete cluster"
   '';
 }

@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ravn-agents
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # URL of your ravn-agents source repository or fork
+    repoURL: 'https://github.com/olafkfreund/ravn-agents.git'
+    targetRevision: main
+    path: deploy/helm/ravn
+    helm:
+      values: |
+        image:
+          repository: ghcr.io/olafkfreund/ravn-k8s
+          tag: latest
+          pullPolicy: IfNotPresent
+        
+        # Identity of this k3d/Kubernetes cluster reported in events
+        cluster: p510-k3d
+        
+        controlPlane:
+          # URL of the ravn-server HTTP ingest endpoint
+          ingestUrl: 'http://ravn-server.ravn-system.svc.cluster.local:18080/ingest'
+          tokenAudience: ravn
+          tokenPath: /var/run/secrets/ravn/token
+          
+        controller:
+          enabled: true
+          
+        nodeAgent:
+          enabled: true
+  
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: ravn-system
+    
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    createNamespace: true

@@ -1,0 +1,49 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: ravn-agents
+  namespace: flux-system
+spec:
+  interval: 5m0s
+  url: https://github.com/olafkfreund/ravn-agents.git
+  ref:
+    branch: main
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: ravn-agents
+  namespace: ravn-system
+spec:
+  interval: 10m0s
+  chart:
+    spec:
+      chart: deploy/helm/ravn
+      sourceRef:
+        kind: GitRepository
+        name: ravn-agents
+        namespace: flux-system
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  values:
+    image:
+      repository: ghcr.io/olafkfreund/ravn-k8s
+      tag: latest
+      pullPolicy: IfNotPresent
+    
+    # Identity of this k3d/Kubernetes cluster reported in events
+    cluster: p510-k3d
+    
+    controlPlane:
+      # URL of the ravn-server HTTP ingest endpoint
+      ingestUrl: 'http://ravn-server.ravn-system.svc.cluster.local:18080/ingest'
+      tokenAudience: ravn
+      tokenPath: /var/run/secrets/ravn/token
+      
+    controller:
+      enabled: true
+      
+    nodeAgent:
+      enabled: true

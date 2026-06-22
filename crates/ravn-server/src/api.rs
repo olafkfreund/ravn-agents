@@ -526,6 +526,15 @@ async fn ingest(
     headers: axum::http::HeaderMap,
     Json(message): Json<ravn_core::Message>,
 ) -> Response {
+    let allowed = {
+        let mut limiter = state.ingest_rate_limiter.lock().unwrap();
+        limiter.consume(1.0)
+    };
+    if !allowed {
+        tracing::warn!("ingest rate limit exceeded");
+        return (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response();
+    }
+
     if state.ingest_auth.is_none() && state.ingest_token_review.is_none() {
         return (StatusCode::NOT_FOUND, "authenticated ingest is not enabled").into_response();
     }

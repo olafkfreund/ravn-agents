@@ -284,20 +284,23 @@ kubectl apply -f deploy/k8s/
 The raw manifests in `deploy/k8s/` are always kept in sync with the Helm chart
 and validated by `kubectl apply --dry-run=client` in CI.
 
-## GitOps (ArgoCD / Flux)
+## GitOps (ArgoCD / FluxCD)
 
-To include the Namespace object in the Argo Application (so it is tracked in
-git alongside the rest of the release):
+Declarative templates for deploying Ravn via popular GitOps engines are provided under `deploy/k8s/gitops/`. These templates deploy the Helm chart directly from the source repository, keeping values versioned in your GitOps configuration.
 
-```yaml
-# values-gitops.yaml
-namespace:
-  create: true
+### ArgoCD Application
+Deploy the pre-built ArgoCD Application manifest:
+```sh
+kubectl apply -f deploy/k8s/gitops/argocd-application.yaml
 ```
+*The manifest specifies `createNamespace: true` and overrides parameters like `cluster` and `controlPlane.ingestUrl` inside the `helm.values` block.*
 
-Point ArgoCD at `deploy/helm/ravn` with `targetRevision: HEAD` and
-`valueFiles: [values-prod.yaml, values-gitops.yaml]`. Set
-`syncPolicy.syncOptions: [CreateNamespace=false]` since the chart manages it.
+### FluxCD HelmRelease
+Deploy the FluxCD GitRepository and HelmRelease manifests:
+```sh
+kubectl apply -f deploy/k8s/gitops/flux-helmrelease.yaml
+```
+*This configures a Flux source controller to track the main branch of `ravn-agents` and executes the Helm controller using the custom values block.*
 
 ## Troubleshooting
 

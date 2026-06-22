@@ -58,6 +58,10 @@ pub struct Config {
     /// Remediation policy engine settings (#116): the per-env policy file plus
     /// the global auto kill switch and circuit-breaker limits.
     pub policy: PolicyConfig,
+    /// Capacity of the token bucket rate limiter for HTTP ingest.
+    pub rate_limit_capacity: f64,
+    /// Refill rate of the token bucket rate limiter for HTTP ingest (tokens/sec).
+    pub rate_limit_refill_rate: f64,
 }
 
 /// Remediation policy-engine configuration (#116). When no policy file is set,
@@ -225,6 +229,16 @@ impl Config {
                 .max(1),
         };
 
+        let rate_limit_capacity = std::env::var("RAVN_INGEST_RATE_LIMIT_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100.0);
+
+        let rate_limit_refill_rate = std::env::var("RAVN_INGEST_RATE_LIMIT_REFILL_RATE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0);
+
         Ok(Self {
             bind,
             log,
@@ -243,6 +257,8 @@ impl Config {
             command_ttl_secs,
             kb_dir,
             policy,
+            rate_limit_capacity,
+            rate_limit_refill_rate,
         })
     }
 

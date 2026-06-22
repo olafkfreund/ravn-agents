@@ -74,4 +74,41 @@ pub struct AppState {
     pub policy: Arc<PolicyEngine>,
     /// How long (seconds) signed commands stay valid (#114/#115).
     pub command_ttl_secs: i64,
+    /// Token bucket rate-limiter for HTTP ingest.
+    pub ingest_rate_limiter: Arc<std::sync::Mutex<TokenBucket>>,
 }
+
+/// A thread-safe token bucket rate-limiter.
+pub struct TokenBucket {
+    capacity: f64,
+    tokens: f64,
+    refill_rate: f64,
+    last_refill: std::time::Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: f64, refill_rate: f64) -> Self {
+        Self {
+            capacity,
+            tokens: capacity,
+            refill_rate,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    pub fn consume(&mut self, amount: f64) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
+
+        if self.tokens >= amount {
+            self.tokens -= amount;
+            true
+        } else {
+            false
+        }
+    }
+}
+

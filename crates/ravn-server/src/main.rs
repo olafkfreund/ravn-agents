@@ -232,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         knowledge,
         policy,
         command_ttl_secs: config.command_ttl_secs,
+        ingest_rate_limiter: std::sync::Arc::new(std::sync::Mutex::new(
+            state::TokenBucket::new(config.rate_limit_capacity, config.rate_limit_refill_rate)
+        )),
     };
 
     // Spawn the ingestion loops (events + heartbeats).
